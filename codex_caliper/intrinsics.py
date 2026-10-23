@@ -47,6 +47,18 @@ class Intrinsics:
     image_size: tuple[int, int]
     zoom_note: str = ""
 
+    def __post_init__(self) -> None:
+        """Normaliza ``dist_coeffs`` a 1D en toda via de construccion.
+
+        ``cv2.calibrateCamera`` devuelve un vector fila/columna 2D, y una
+        ``Intrinsics`` cargada desde un JSON externo (o construida a mano por
+        una tarea posterior) podria traer esa misma forma sin ravelar. Si no
+        se normaliza aqui, ``dist_coeffs[0]`` deja de ser el escalar ``k1`` y
+        pasa a ser un arreglo de un elemento, silenciosamente, en cualquier
+        camino que no sea ``calibrate_from_corners``.
+        """
+        self.dist_coeffs = np.asarray(self.dist_coeffs).ravel()
+
     @property
     def is_acceptable(self) -> bool:
         """True si el RMS de reproyeccion esta bajo el umbral de aceptacion."""
@@ -104,16 +116,26 @@ def calibrate_from_corners(object_points, image_points, image_size: tuple[int, i
     )
     return Intrinsics(
         camera_matrix=camera_matrix,
-        # cv2.calibrateCamera devuelve dist_coeffs como fila/columna 2D; se
-        # aplana a 1D para que dist_coeffs[0] sea k1 y no el vector entero.
-        dist_coeffs=np.asarray(dist_coeffs).ravel(),
+        # El aplanado a 1D ya no hace falta aqui: Intrinsics.__post_init__ lo
+        # garantiza para cualquier via de construccion, no solo esta.
+        dist_coeffs=dist_coeffs,
         rms_px=float(rms),
         image_size=tuple(image_size),
     )
 
 
 def undistort(frame: np.ndarray, intr: Intrinsics) -> np.ndarray:
-    """Corrige la distorsion de lente de ``frame`` usando los intrinsecos dados."""
+    """Corrige la distorsion de lente de ``frame`` usando los intrinsecos dados.
+
+    Es la unica via de consumo que trae esta tarea, asi que es aqui donde debe
+    dispararse la guardia: ``frame.shape`` es ``(alto, ancho, ...)`` y
+    ``image_size`` es ``(ancho, alto)``, por eso se invierte el orden al
+    llamar a ``require_compatible``. Sin esta llamada, aplicar intrinsecos de
+    otra posicion de zoom a un frame de otra resolucion no lanzaria ningun
+    error ni aviso -- justo la corrupcion silenciosa que esta guardia existe
+    para evitar.
+    """
+    intr.require_compatible((frame.shape[1], frame.shape[0]))
     return cv2.undistort(frame, intr.camera_matrix, intr.dist_coeffs)
 
 

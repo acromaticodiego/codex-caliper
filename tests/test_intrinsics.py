@@ -165,3 +165,37 @@ def test_undistort_is_identity_for_zero_distortion():
     frame = rng.integers(0, 255, (480, 640, 3), dtype=np.uint8)
     result = undistort(frame, intr)
     np.testing.assert_array_equal(result, frame)
+
+
+def test_undistort_raises_when_frame_resolution_does_not_match_calibration():
+    # Intrinsecos calibrados a 640x480; el frame entregado es 1920x1080 --
+    # exactamente el caso de un anillo de zoom movido entre calibrar y medir.
+    intr = _dummy_intrinsics(image_size=(640, 480))
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    with pytest.raises(IntrinsicsMismatch):
+        undistort(frame, intr)
+
+
+def test_undistort_does_not_raise_when_frame_resolution_matches_calibration():
+    intr = _dummy_intrinsics(image_size=(1920, 1080))
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    undistort(frame, intr)  # no debe lanzar
+
+
+def test_dist_coeffs_is_flattened_to_1d_on_direct_construction():
+    # Esta es exactamente la forma (5,1) que devuelve cv2.calibrateCamera sin
+    # ravelar; una tarea posterior podria construir Intrinsics asi a mano.
+    column_dist = np.array([[-0.22], [0.09], [0.0006], [-0.0004], [0.015]])
+    intr = _dummy_intrinsics(dist_coeffs=column_dist)
+    assert intr.dist_coeffs.shape == (5,)
+    assert intr.dist_coeffs[0] == pytest.approx(-0.22)
+
+
+def test_dist_coeffs_stays_1d_after_save_and_load_roundtrip(tmp_path):
+    column_dist = np.array([[-0.22], [0.09], [0.0006], [-0.0004], [0.015]])
+    intr = _dummy_intrinsics(dist_coeffs=column_dist)
+    intr.save(tmp_path / "intrinsics.json")
+    loaded = Intrinsics.load(tmp_path / "intrinsics.json")
+
+    assert loaded.dist_coeffs.shape == (5,)
+    assert loaded.dist_coeffs[0] == pytest.approx(-0.22)
