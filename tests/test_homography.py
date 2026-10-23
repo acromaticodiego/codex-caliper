@@ -24,6 +24,9 @@ import pytest
 from codex_caliper.aruco_tools import CalibrationState, MarkerDetection, detect_markers
 from codex_caliper.config import AppConfig
 from codex_caliper.homography import (
+    DegenerateMarkerLayout,
+    _canvas_bounds_mm,
+    _image_points_for,
     canvas_size_for,
     compute_plane_calibration,
     rectify,
@@ -188,6 +191,84 @@ def test_residual_grows_when_a_marker_is_misplaced():
     assert plane.residual_mm > 1.0
 
 
+def test_per_marker_residual_is_not_meaningfully_more_sensitive_than_the_global_rms():
+    """Mide si agrupar el residual por marcador (RMS propio de cada uno,
+    maximo entre los 4) es una metrica MEANINGFULLY mas sensible que el RMS
+    global de ``residual_mm`` -- la pregunta que decide si vale la pena
+    agregar un campo ``max_marker_error_mm`` a ``PlaneCalibration`` (fix
+    round 1, Finding 3).
+
+    Reproduce el mismo calculo que hace ``compute_plane_calibration``
+    internamente (ajuste + reproyeccion), pero agrupando el error cuadratico
+    por marcador antes de promediar. Barrido sobre varios desplazamientos de
+    UN solo marcador: la razon maximo-por-marcador / global se mantiene
+    entre ~1.2x y ~1.6x en todos los casos -- muy por debajo del umbral de
+    3x que justificaria el campo nuevo. Por eso NO se agrego (ver la
+    ADVERTENCIA en el docstring de ``PlaneCalibration``, con los numeros
+    medidos).
+    """
+    cfg = _cfg()
+    detections = _fake_camera_detections(cfg)
+
+    def global_and_max_marker_residual_mm(shift_mm: float, shifted_id: int) -> tuple[float, float]:
+        shifted_layout = dict(cfg.marker_layout)
+        cx, cy = shifted_layout[shifted_id]
+        shifted_layout[shifted_id] = (cx + shift_mm, cy)
+        shifted_cfg = dataclasses.replace(cfg, marker_layout=shifted_layout)
+
+        world_mm = world_points_for(detections, shifted_cfg)
+        image_px = _image_points_for(detections)
+        min_x, min_y, _max_x, _max_y = _canvas_bounds_mm(shifted_cfg)
+        mm_per_px = shifted_cfg.canvas_mm_per_px
+        canvas_px = (world_mm - np.array([min_x, min_y])) / mm_per_px
+
+        H, _inlier_mask = cv2.findHomography(image_px, canvas_px, method=0)
+        reprojected = cv2.perspectiveTransform(image_px.reshape(-1, 1, 2).astype(np.float64), H).reshape(-1, 2)
+        squared_error_px = np.sum((reprojected - canvas_px) ** 2, axis=1)
+
+        global_residual_mm = float(np.sqrt(np.mean(squared_error_px)) * mm_per_px)
+        per_marker_rms_mm = [
+            float(np.sqrt(np.mean(squared_error_px[i * 4 : (i + 1) * 4])) * mm_per_px)
+            for i in range(len(detections))
+        ]
+        return global_residual_mm, max(per_marker_rms_mm)
+
+    for shift_mm in (1.0, 5.0, 10.0, 20.0):
+        global_mm, max_marker_mm = global_and_max_marker_residual_mm(shift_mm, cfg.marker_ids[0])
+        ratio = max_marker_mm / global_mm
+        assert 1.0 < ratio < 3.0, (
+            f"shift={shift_mm} mm: max_marker/global ratio={ratio:.3f} -- "
+            "re-evaluate whether max_marker_error_mm is worth adding as a field"
+        )
+
+
+def test_raises_on_degenerate_marker_layout_instead_of_a_raw_opencv_assertion():
+    """Un ``cfg.marker_layout``/``marker_length_mm`` degenerado -- aqui,
+    4 centros colineales combinados con ``marker_length_mm=0.0``, que
+    colapsa cada marcador a un solo punto de mundo sobre esa misma linea --
+    hace que los 16 puntos de mundo sean literalmente colineales.
+    ``cv2.findHomography`` no puede ajustar NINGUNA homografia con eso y
+    devuelve ``None`` (confirmado empiricamente antes de este fix). Sin
+    guardia, ese ``None`` se propaga a ``cv2.perspectiveTransform`` como un
+    assert crudo de OpenCV C++ ("scn + 1 == m.cols"); con la guardia, se
+    lanza ``DegenerateMarkerLayout`` con un mensaje que nombra el problema
+    (fix round 1, Finding 2).
+
+    Nota: medido tambien que centros duplicados o colineales por si solos
+    -- con ``marker_length_mm`` real (> 0) -- NO alcanzan a degenerar los
+    puntos de mundo: cada marcador aporta sus propias 4 esquinas separadas
+    por ``marker_length_mm`` en AMBOS ejes, asi que el conjunto siempre
+    abarca 2 dimensiones salvo que el propio lado del marcador tambien
+    colapse a (casi) cero.
+    """
+    degenerate_layout = {1: (0.0, 0.0), 2: (100.0, 0.0), 3: (200.0, 0.0), 4: (300.0, 0.0)}
+    cfg = _cfg(marker_layout=degenerate_layout, marker_length_mm=0.0)
+    detections = _fake_camera_detections(cfg)
+
+    with pytest.raises(DegenerateMarkerLayout):
+        compute_plane_calibration(detections, cfg)
+
+
 def test_returns_none_when_fewer_than_three_markers():
     """Con menos de 3 marcadores distintos no hay suficiente geometria: el
     caller nunca debe recibir una PlaneCalibration que no pueda sostener una
@@ -240,13 +321,40 @@ def test_world_points_for_corner_order_matches_opencv_detection():
     assert len(detections) == 1
     corners_px = detections[0].corners
 
-    # Esquina superior izquierda real en la imagen: entre las dos de menor y
-    # (el "arriba" de la imagen), la de menor x.
+    # Identidad geometrica real de las 4 esquinas en la imagen, sin asumir
+    # nada sobre el orden que entrega OpenCV: entre las dos de menor y (el
+    # "arriba" de la imagen), la de menor x es la superior izquierda y la de
+    # mayor x la superior derecha; simetrico para las dos de mayor y (abajo).
     top_two_idx = np.argsort(corners_px[:, 1])[:2]
+    bottom_two_idx = np.argsort(corners_px[:, 1])[2:]
     top_left_idx = top_two_idx[np.argmin(corners_px[top_two_idx, 0])]
-    assert top_left_idx == 0, "OpenCV no devuelve la esquina superior izquierda primero: revisar la suposicion"
+    top_right_idx = top_two_idx[np.argmax(corners_px[top_two_idx, 0])]
+    bottom_right_idx = bottom_two_idx[np.argmax(corners_px[bottom_two_idx, 0])]
+    bottom_left_idx = bottom_two_idx[np.argmin(corners_px[bottom_two_idx, 0])]
 
+    # Las 4 identidades deben caer en los indices 0,1,2,3 en ESE orden: si
+    # OpenCV no devolviera horario desde la superior izquierda, esto lo
+    # detectaria en vez de asumirlo.
+    assert (top_left_idx, top_right_idx, bottom_right_idx, bottom_left_idx) == (0, 1, 2, 3), (
+        "OpenCV no devuelve las esquinas en orden horario desde la superior izquierda: revisar la suposicion"
+    )
+
+    # Las 4 esquinas de ``world_points_for``, UNA A UNA (no solo la 0): un
+    # error de permutacion plausible -- p.ej. mantener el indice 0 pero
+    # intercambiar 1 y 3 (la reflexion que resulta de confundir horario con
+    # antihorario) -- debe fallar aqui. Verificado manualmente: con ese
+    # intercambio aplicado a proposito en world_points_for, este assert
+    # falla con "Mismatched elements: 4 / 8" (los indices 1 y 3 no coinciden
+    # con lo esperado); revertido el intercambio, vuelve a pasar.
     world = world_points_for(detections, cfg)
     cx, cy = marker_centre_mm
     half = cfg.marker_length_mm / 2.0
-    assert world[0] == pytest.approx([cx - half, cy - half])
+    expected_world = np.array(
+        [
+            [cx - half, cy - half],  # superior izquierda
+            [cx + half, cy - half],  # superior derecha
+            [cx + half, cy + half],  # inferior derecha
+            [cx - half, cy + half],  # inferior izquierda
+        ]
+    )
+    assert world == pytest.approx(expected_world)

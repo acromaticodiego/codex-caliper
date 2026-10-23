@@ -28,6 +28,29 @@ from codex_caliper.aruco_tools import CalibrationState, MarkerDetection, calibra
 from codex_caliper.config import AppConfig
 
 
+class DegenerateMarkerLayout(Exception):
+    """Se lanza cuando ``cv2.findHomography`` no puede ajustar NINGUNA
+    homografia porque los puntos de mundo que implica ``cfg.marker_layout``
+    (combinado con ``cfg.marker_length_mm``) son degenerados -- tipicamente
+    colineales -- y ``findHomography`` devuelve ``None`` en vez de una
+    matriz. Sin esta guardia, ese ``None`` se propaga a
+    ``cv2.perspectiveTransform`` y revienta con un assert crudo de OpenCV
+    C++ ("scn + 1 == m.cols"), ilegible para quien opera el sistema.
+
+    A diferencia de ``BLOCKED`` (menos de 3 marcadores visibles, una
+    condicion TRANSITORIA que se resuelve sola en el siguiente cuadro si el
+    marcador vuelve a aparecer), esto es un error de CONFIGURACION: un
+    ``marker_layout`` con centros y/o un ``marker_length_mm`` que colapsan
+    los puntos de mundo a una linea va a fallar exactamente igual en todos
+    los cuadros siguientes hasta que alguien corrija el archivo de config.
+    Devolver ``None`` aqui, igual que en ``BLOCKED``, confundiria a quien
+    consume la API -- "esperá, el marcador va a reaparecer" -- cuando en
+    realidad el problema no se autocorrige nunca. Por eso se lanza, igual
+    que ``IntrinsicsMismatch`` en ``intrinsics.py`` para un problema de
+    configuracion igualmente persistente (un anillo de zoom movido).
+    """
+
+
 @dataclasses.dataclass
 class PlaneCalibration:
     """Resultado de ajustar la homografia del plano metrico en un frame.
@@ -41,6 +64,22 @@ class PlaneCalibration:
     confianza que ve el operador. ``state`` es ``OK`` con los 4 marcadores o
     ``DEGRADED`` con 3; con menos no existe esta instancia en absoluto (ver
     ``compute_plane_calibration``).
+
+    ADVERTENCIA sobre que tan sensible es ``residual_mm``: es un RMS
+    GLOBAL sobre las 16 (o 12) esquinas, y el ajuste de minimos cuadrados
+    absorbe parte del error de UN solo marcador mal ubicado repartiendolo
+    entre los demas puntos, que siguen siendo correctos. Medido sobre un
+    layout de 300x200 mm con una camara sintetica conocida: desplazar UN
+    marcador produce apenas ~0.065 mm de ``residual_mm`` por mm de error (un
+    marcador desplazado 12 mm -- medio cuerpo de marcador -- sube el
+    residual a solo ~0.77-0.96 mm, segun cual). Se midio tambien el RMS por
+    marcador (las 4 esquinas de cada uno) y su maximo entre los 4: resulta
+    apenas 1.2x-1.6x mas sensible que el RMS global, no una mejora
+    cualitativa -- por eso NO se agrega como campo aparte. ``residual_mm``
+    es un indicador honesto de "que tan bien ajusta el conjunto", NO un
+    indicador preciso de "hay UN marcador fuera de lugar": un numero bajo
+    no descarta esa posibilidad. Ver el informe de Task 5 (fix round 1,
+    Finding 3) para la tabla de sensibilidad medida.
     """
 
     H: np.ndarray
@@ -139,6 +178,11 @@ def compute_plane_calibration(detections: list[MarkerDetection], cfg: AppConfig)
     mismo origen y escala que usa ``canvas_size_for``. ``residual_mm``
     reproyecta las esquinas de imagen con la ``H`` ajustada y mide el RMS del
     desacuerdo contra esos mismos puntos de lienzo, convertido a milimetros.
+
+    Lanza ``DegenerateMarkerLayout`` si ``cv2.findHomography`` no puede
+    ajustar ninguna homografia (puntos de mundo colineales, tipicamente por
+    un ``cfg.marker_layout``/``marker_length_mm`` con un error de tipeo) --
+    ver esa excepcion para por que se lanza en vez de devolver ``None``.
     """
     state = calibration_state(detections)
     if state is CalibrationState.BLOCKED:
@@ -152,6 +196,14 @@ def compute_plane_calibration(detections: list[MarkerDetection], cfg: AppConfig)
     canvas_px = (world_mm - np.array([min_x, min_y])) / mm_per_px
 
     H, _inlier_mask = cv2.findHomography(image_px, canvas_px, method=0)
+    if H is None:
+        raise DegenerateMarkerLayout(
+            "Could not fit a plane homography: the marker layout in the configuration "
+            "produces degenerate (collinear) world points, so no homography can explain "
+            "them. This is a configuration error -- check cfg.marker_layout and "
+            "cfg.marker_length_mm for a typo -- not a transient loss of markers, and it "
+            "will not resolve on its own on the next frame."
+        )
 
     reprojected = cv2.perspectiveTransform(
         image_px.reshape(-1, 1, 2).astype(np.float64), H
