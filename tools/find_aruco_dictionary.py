@@ -75,25 +75,25 @@ def find_dictionary(image: np.ndarray, expected_count: int = 4) -> list[Dictiona
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Identifica el diccionario ArUco predefinido de una imagen."
+        description="Identify the predefined ArUco dictionary of an image."
     )
-    parser.add_argument("image", type=Path, help="Ruta a la imagen con los marcadores")
+    parser.add_argument("image", type=Path, help="Path to the image containing the markers")
     parser.add_argument(
-        "--expected-count", type=int, default=4, help="Numero de marcadores esperado (default: 4)"
+        "--expected-count", type=int, default=4, help="Expected number of markers (default: 4)"
     )
     args = parser.parse_args(argv)
 
     image = cv2.imread(str(args.image))
     if image is None:
-        print(f"ERROR: no se pudo leer la imagen {args.image}")
+        print(f"ERROR: could not read image {args.image}")
         return 1
 
     matches = find_dictionary(image, expected_count=args.expected_count)
     if not matches:
-        print("No se detecto ningun marcador ArUco en la imagen.")
+        print("No ArUco markers were detected in the image.")
         return 1
 
-    print(f"{'Diccionario':<26} {'#':>3}  IDs")
+    print(f"{'Dictionary':<26} {'#':>3}  IDs")
     for match in matches:
         print(f"{match.name:<26} {match.count:>3}  {match.ids}")
     return 0
