@@ -13,32 +13,54 @@ Dos ideas se verifican aqui con cuidado, no de pasada:
    realmente medidas sobre el mismo banano sintetico, no dos constantes
    inventadas -- esa es la razon de ser de todo el modulo.
 
-Nota sobre ``test_codex_length_matches_outer_curve_ground_truth_within_2_percent``:
-a diferencia de los otros tests de este archivo, que usan el banano de
-referencia con tapas completamente redondeadas en ambas puntas (radius=220,
-arc=0.85, width=36, sin pedicelo ni adelgazamiento floral), este test usa un
-banano mas angosto con la punta floral adelgazada casi hasta un punto
-(``blossom_taper_mm`` cercano a ``width_mm``). La razon: ``split_contour_at_tips``
-ubica el punto del contorno mas cercano a cada punta del eje medial, y esa
-punta, en una tapa redondeada, es el CENTRO de la tapa (ver docstring de
-``medial.py``) -- un punto equidistante de TODO el borde de la tapa, no solo
-del punto donde el riel exterior se funde con ella. Con ``width_mm=36`` eso
-reparte entre 60 y 110 mm de material de tapa (segun donde el ruido de
-rasterizado rompa el empate) entre las dos cadenas resultantes, una cantidad
-que domina por completo la diferencia real entre riel exterior e interior
-(apenas ~30 mm para estos radio/angulo) y hace que CUALQUIER division en dos
-cadenas sea matematicamente incompatible con que la cadena mas larga
-(``outer_curve``, por definicion) coincida con la formula analitica pura
-``(R+w/2)*theta`` dentro de un 2%: para que la cadena exterior gane por ser
-la mas larga necesita mas del 36% del material de tapa, pero para cumplir el
-2% de tolerancia necesita menos del 4%. Esas dos condiciones no se pueden
-cumplir a la vez con ``width_mm=36`` (verificado numericamente). Adelgazando
-la punta floral casi a cero y usando un calibre mas angosto (``width_mm=4``)
-dejan practicamente sin material de tapa ambigua (el sobrante de ambas
-puntas por debajo del presupuesto del 2%), que es exactamente la situacion
-real: un banano real no termina en una tapa semicircular ancha, termina en
-una cicatriz floral y una base de pedicelo angostas. Ver el informe de esta
-tarea para la medicion completa que motiva este ajuste.
+Nota sobre ``test_codex_length_matches_outer_curve_ground_truth_within_2_percent``
+(corregida en la ronda de revision 1 -- ver el informe de esta tarea para el
+historial completo): a diferencia de los otros tests de este archivo, que
+usan el banano de referencia con tapas completamente redondeadas en ambas
+puntas (radius=220, arc=0.85, width=36, sin pedicelo ni adelgazamiento
+floral), este test usa un banano con la punta floral adelgazada casi hasta
+un punto (``blossom_taper_mm`` cercano a ``width_mm``) y angulo de arco mas
+grande. La razon tiene DOS causas, y no pesan igual:
+
+**Causa primaria, deterministica, no corregible con un mejor algoritmo de
+particion**: ``gt.outer_length_mm`` es la formula analitica pura del riel,
+``(R+w/2)*theta`` -- por construccion EXCLUYE todo el material de la tapa
+redondeada de las puntas. Pero cualquier particion del contorno real en dos
+cadenas tiene que asignar ESE material a alguna de las dos, porque esta
+fisicamente alli en la mascara rasterizada. Una tapa completa expone un arco
+de ``pi*w/2`` (medio circulo de radio ``w/2``): con ``width_mm=36`` eso es
+``pi*18 = 56.55 mm`` por punta, un 28% de los 202.3 mm del riel exterior
+puro -- y con las DOS puntas redondeadas (el fixture original, sin
+adelgazar), la cadena mas larga midio 284.90 mm contra un ground truth de
+202.30 mm: **+40.83%**, medido directamente con la implementacion real, no
+estimado. Ningun algoritmo de particion en dos cadenas puede hacer que la
+cadena exterior quede dentro del 2% de la formula pura mientras dos tapas
+anchas sigan expuestas: es un desajuste estructural entre QUE mide la
+formula (riel sin tapas) y QUE contiene el contorno (riel CON tapas), no un
+defecto de implementacion.
+
+**Causa secundaria, de ambiguedad por empate**: la punta del eje medial en
+una tapa redondeada es el CENTRO de esa tapa (ver docstring de
+``medial.py``), un punto casi equidistante de TODO el borde expuesto de la
+tapa -- medido sobre el fixture original (width=36): la punta esta a 17.2 mm
+del contorno (la mitad del calibre, 18 mm, como se espera de una tapa
+redondeada) y hay 85 y 97 puntos del contorno (en las dos puntas
+respectivamente) a menos de 1 px de esa distancia minima. Que punto exacto
+de ese empate gana la busqueda de "mas cercano" depende del ruido de
+rasterizado, no de la geometria -- pero esto solo decide COMO se reparte el
+material de la tapa entre las dos cadenas, no SI hay material de tapa que
+repartir. Es secundario frente a la causa primaria: incluso con una
+particion perfectamente deterministica y libre de ruido, el material de la
+tapa seguiria estando alli y seguiria rompiendo el 2% a ``width_mm=36``.
+
+Adelgazar la punta floral casi a cero (``blossom_taper_mm`` ~ ``width_mm``)
+elimina el material de tapa de ESE extremo (un cono no tiene "tapa": el
+radio cae a 0 exactamente en la punta). Queda sin adelgazar el extremo del
+pedicelo (sin pedicelo en este fixture, osea tambien una tapa redondeada
+completa) -- su contribucion, acotada por ``(w/2)*pi``, es la que el test
+verifica explicitamente que no domine, en vez de asumirlo. Ver el informe
+de esta tarea para la medicion completa, incluida la prueba de que el test
+efectivamente falla si ``outer_curve`` selecciona la cadena equivocada.
 """
 
 from __future__ import annotations
@@ -121,17 +143,39 @@ def test_outer_curve_is_the_longer_of_the_two_chains():
 
 
 def test_codex_length_matches_outer_curve_ground_truth_within_2_percent():
-    # Ver el docstring del modulo: este banano usa un calibre angosto y la
-    # punta floral casi adelgazada a un punto, para que el material de
-    # tapa redondeada en las puntas no domine la comparacion contra la
-    # formula analitica pura (R+w/2)*theta.
-    radius_mm, arc_rad, width_mm, mm_per_px = 220.0, 0.85, 4.0, 0.2
-    mask, gt = make_banana(radius_mm, arc_rad, width_mm, mm_per_px, blossom_taper_mm=3.5)
+    # Ver el docstring del modulo: este banano adelgaza la punta floral casi
+    # a un punto y usa un angulo de arco grande para que el riel exterior
+    # puro (R+w/2)*theta sea mucho mas grande que el material de tapa
+    # redondeada que queda sin adelgazar en el extremo del pedicelo.
+    radius_mm, arc_rad, width_mm, mm_per_px = 220.0, 4.0, 12.0, 0.2
+    blossom_taper_mm = 11.9
+    mask, gt = make_banana(radius_mm, arc_rad, width_mm, mm_per_px, blossom_taper_mm=blossom_taper_mm)
     axis = medial_axis_path(mask)
     assert axis is not None
     contour = contour_of(mask)
-    got = smoothed_arc_length_mm(outer_curve(contour, axis.tips_px), mm_per_px)
-    assert got == pytest.approx(gt.outer_length_mm, rel=0.02)
+
+    chain_a, chain_b = split_contour_at_tips(contour, axis.tips_px)
+    length_a = smoothed_arc_length_mm(chain_a, mm_per_px)
+    length_b = smoothed_arc_length_mm(chain_b, mm_per_px)
+    outer_mm = smoothed_arc_length_mm(outer_curve(contour, axis.tips_px), mm_per_px)
+    inner_mm = min(length_a, length_b)
+
+    assert outer_mm == pytest.approx(gt.outer_length_mm, rel=0.02)
+
+    # No alcanza con "outer > inner" por cualquier margen: eso pasaria por
+    # casualidad aunque outer_curve devolviera la cadena equivocada, o
+    # aunque no se partiera el contorno en absoluto (ver fix round 1, donde
+    # el fixture original fallaba exactamente asi). El riel exterior e
+    # interior puros difieren, en forma cerrada, en width_mm*arc_rad
+    # ((R+w/2)*theta - (R-w/2)*theta = w*theta) -- la unica tapa que queda
+    # sin adelgazar (la del pedicelo) puede desplazar el margen MEDIDO hasta
+    # (w/2)*pi de distancia de ese valor cerrado (la mitad de esa tapa para
+    # cada cadena, en el peor de los casos), pero nunca mas: el margen real
+    # tiene que caer dentro de esa cota, no solo ser positivo.
+    expected_gap_mm = width_mm * arc_rad
+    cap_slack_mm = (width_mm / 2.0) * math.pi
+    margin_mm = outer_mm - inner_mm
+    assert margin_mm == pytest.approx(expected_gap_mm, abs=cap_slack_mm)
 
 
 def test_outer_curve_is_longer_than_the_medial_axis():
