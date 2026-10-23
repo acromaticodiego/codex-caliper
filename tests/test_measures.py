@@ -75,6 +75,25 @@ de suavizado de la derivada, ahora en milimetros en vez de muestras) se
 corrigio en la misma ronda porque un numero fijo de MUESTRAS no es una
 cantidad invariante de escala (depende de la resolucion del esqueleto y de
 ``mm_per_px``), aunque no era la causa de este defecto en particular.
+
+Nota sobre la ronda de revision 2
+----------------------------------
+Dos cambios, ninguno sobre el recorte en si:
+
+1. ``area_mm2`` ahora se restringe al tramo del fruto, igual que
+   ``codex_length_mm`` y ``volume_mm3`` -- antes contaba los pixeles de la
+   mascara COMPLETA (pedicelo incluido), una inconsistencia entre las
+   cuatro magnitudes que la revision señalo. Ver
+   ``test_area_is_restricted_to_the_fruit_when_pedicel_is_present``.
+2. ``measure_mask`` ya no envuelve toda la funcion en un
+   ``except Exception: return None``. Ese ``except`` generico convertia
+   cualquier error de programacion futuro en esta cadena (un typo, una
+   firma que cambio) en el mismo ``None`` silencioso que una mascara
+   degenerada -- indistinguible de "no hay nada que medir". La
+   degeneracion geometrica ahora se chequea explicitamente en cada paso
+   (igual que antes, pero sin la red de seguridad generica detras); un
+   error de programacion real se propaga. Ver
+   ``test_a_programming_error_propagates_instead_of_returning_none``.
 """
 
 from __future__ import annotations
@@ -135,12 +154,43 @@ def test_caliper_matches_ground_truth_within_half_a_millimetre():
 
 
 def test_area_and_volume_match_ground_truth_within_3_percent():
+    # Banano SIN pedicelo: start=0, end=n-1, asi que el area "del fruto"
+    # (ronda de revision 2) coincide con el area de la mascara completa --
+    # este test no cambia de comportamiento, solo de que camino de codigo
+    # lo calcula. Ver test_area_is_restricted_to_the_fruit_when_pedicel_is_present
+    # para el caso donde SI hay diferencia.
     cfg = _cfg()
     mask, gt = make_banana(RADIUS_MM, ARC_RAD, WIDTH_MM, MM_PER_PX)
     m = measure_mask(mask, MM_PER_PX, cfg)
     assert m is not None
     assert m.area_mm2 == pytest.approx(gt.area_mm2, rel=0.03)
     assert m.volume_mm3 == pytest.approx(gt.volume_mm3, rel=0.03)
+
+
+@pytest.mark.parametrize("width_mm,pedicel_width_mm", FRUIT_GEOMETRIES)
+def test_area_is_restricted_to_the_fruit_when_pedicel_is_present(width_mm, pedicel_width_mm):
+    # Ronda de revision 2, finding 2: area_mm2 debe describir el mismo
+    # tramo que codex_length_mm y volume_mm3 (el fruto), no la mascara
+    # completa -- reportar un area que incluye el tallo junto a una
+    # longitud que lo excluye no describe el mismo objeto.
+    cfg = _cfg()
+    mask, _gt = make_banana(
+        RADIUS_MM, ARC_RAD, width_mm, MM_PER_PX,
+        pedicel_mm=PEDICEL_MM, pedicel_width_mm=pedicel_width_mm,
+    )
+    full_mask_area_mm2 = float(np.count_nonzero(mask)) * (MM_PER_PX ** 2)
+
+    m = measure_mask(mask, MM_PER_PX, cfg)
+    assert m is not None
+
+    # el area del fruto es estrictamente menor que la de la mascara
+    # completa (se quito algo, no es un no-op)...
+    assert m.area_mm2 < full_mask_area_mm2
+    # ...por una cantidad que no es ruido numerico: el pedicelo mas la
+    # porcion de la transicion que el corte tambien quita son una fraccion
+    # real del area total, no un redondeo de un par de pixeles.
+    removed_fraction = (full_mask_area_mm2 - m.area_mm2) / full_mask_area_mm2
+    assert removed_fraction > 0.02
 
 
 def test_volume_requires_the_hemisphere_cap_correction():
@@ -289,3 +339,28 @@ def test_mask_away_from_the_border_is_not_rejected():
 def test_degenerate_mask_returns_none_without_raising():
     cfg = _cfg()
     assert measure_mask(np.zeros((80, 80), np.uint8), MM_PER_PX, cfg) is None
+
+
+def test_a_programming_error_propagates_instead_of_returning_none(monkeypatch):
+    # Ronda de revision 2, finding 1: measure_mask debe distinguir
+    # degeneracion GEOMETRICA (mascara vacia, que toca el borde, sin dos
+    # puntas -- todos cubiertos arriba, siempre devuelven None) de un error
+    # de PROGRAMACION real en la cadena de llamadas. Antes de esta ronda,
+    # un ``except Exception`` generico envolvia toda la funcion y
+    # convertia cualquier bug futuro en este mismo None silencioso --
+    # indistinguible, para quien llama, de "esta mascara no es medible".
+    # Este test rompe deliberadamente una llamada interna (no una
+    # degeneracion geometrica: la mascara es un banano perfectamente
+    # valido) y confirma que la excepcion se propaga, no que measure_mask
+    # la trague.
+    import codex_caliper.geometry.measures as measures_module
+
+    def _broken_width_profile_mm(*_args, **_kwargs):
+        raise AttributeError("bug simulado deliberadamente, no degeneracion geometrica")
+
+    monkeypatch.setattr(measures_module, "width_profile_mm", _broken_width_profile_mm)
+
+    cfg = _cfg()
+    mask, _gt = make_banana(RADIUS_MM, ARC_RAD, WIDTH_MM, MM_PER_PX)
+    with pytest.raises(AttributeError):
+        measures_module.measure_mask(mask, MM_PER_PX, cfg)

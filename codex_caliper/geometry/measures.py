@@ -95,15 +95,25 @@ en la MISMA mascara, cae entre 87% y 105% de los 25 mm del pedicelo -- sin
 ningun signo invertido ni disparo instable (ver ``tests/test_measures.py``
 y el informe de la ronda de revision 1 para la tabla completa).
 
-Calibre, area y volumen
-------------------------
+Calibre, area y volumen -- las cuatro magnitudes son del FRUTO, no de la
+mascara completa
+------------------------------------------------------------------------
 El calibre se toma en el punto medio del eje YA RECORTADO (no en el maximo
 ni en el eje sin recortar): el CODEX fija el punto de medicion en la mitad
 del fruto, y medir en el maximo circulo inscripto o sobre el eje sin
 recortar da un numero distinto (ver informe de esta tarea).
 
-El area es el conteo de pixeles de la mascara completa por ``mm_per_px**2``
--- no se restringe al tramo del fruto.
+**Ronda de revision 2 -- el area tambien se restringe al fruto.** La
+primera version contaba los pixeles de la mascara COMPLETA (incluido el
+pedicelo) mientras que ``codex_length_mm`` y ``volume_mm3`` ya se
+restringian al tramo recortado -- una inconsistencia que la ronda de
+revision 2 señalo: reportar un area que incluye el tallo junto a una
+longitud que lo excluye no describe el mismo objeto. ``_fruit_pixel_count``
+recorta la mascara con la misma logica de plano perpendicular al eje local
+que ``_restrict_outer_to_fruit`` usa para la curva exterior, pero aplicada
+directamente sobre los pixeles en vez de sobre una cadena de puntos. Las
+CUATRO magnitudes que devuelve ``measure_mask`` -- longitud, calibre, area
+y volumen -- describen el mismo tramo del fruto, nunca el pedicelo.
 
 El volumen asume seccion circular, ``V = suma(pi*(w/2)**2 * ds)``, integrada
 SOLO sobre el tramo del fruto (``trim_pedicel``). El eje medial retrocede
@@ -114,6 +124,21 @@ casquete esferico mas alla de ese centro. Por eso se agrega explicitamente
 el volumen de un casquete esferico, ``(2/3)*pi*r**3`` con el radio local del
 extremo, en cada extremo que NO fue recortado (si el extremo fue recortado,
 no hay casquete fisico que agregar: el corte es un plano, no una tapa).
+
+Contrato de excepciones -- ronda de revision 2
+------------------------------------------------
+``measure_mask`` no lanza una excepcion por una mascara GEOMETRICAMENTE
+degenerada: vacia, demasiado chica, que toca el borde, sin dos puntas
+significativas. Esos casos estan explicitamente cubiertos por los ``if``
+de la funcion (no por un ``except`` generico) y devuelven ``None``, igual
+que el contrato de ``medial_axis_path`` (Task 6). Un ``except Exception``
+que envolviera toda la funcion, en cambio, convertiria CUALQUIER error de
+programacion futuro en esta cadena de llamadas -- un typo, una firma que
+cambio, un indice mal calculado -- en el mismo ``None`` silencioso y
+permanente que una mascara degenerada, indistinguible de "no hay nada que
+medir" para quien llama. Por eso no existe: la degeneracion geometrica se
+chequea explicitamente ANTES de cada paso riesgoso, y un error de
+programacion real se propaga como la excepcion que es.
 """
 
 from __future__ import annotations
@@ -369,6 +394,53 @@ def _restrict_outer_to_fruit(
     return full_outer[lo_bound : hi_bound + 1]
 
 
+def _fruit_pixel_count(mask: np.ndarray, axis: MedialAxis, start: int, end: int, n: int) -> int:
+    """Cuenta los pixeles de ``mask`` que pertenecen al tramo del FRUTO
+    (entre los indices ``start`` y ``end`` del eje medial), recortando con
+    un plano perpendicular al eje medial local en cada extremo que
+    ``trim_pedicel`` efectivamente recorto.
+
+    Misma idea de corte que ``_restrict_outer_to_fruit`` (un plano por
+    extremo recortado, orientado hacia el punto medio del tramo del
+    fruto, nunca una busqueda de "punto mas cercano" sobre un contorno
+    cerrado), pero aplicada directamente sobre la mascara raster en vez de
+    sobre una cadena de puntos de contorno -- ver docstring del modulo,
+    ronda de revision 2: el area se restringe al fruto igual que la
+    longitud y el volumen.
+    """
+    if start == 0 and end == n - 1:
+        return int(np.count_nonzero(mask))
+
+    mask_bool = np.asarray(mask).astype(bool)
+    height, width = mask_bool.shape
+    ys, xs = np.mgrid[0:height, 0:width]
+    keep = np.ones((height, width), dtype=bool)
+    mid = (start + end) // 2
+    reference = axis.path_px[mid]
+
+    def apply_cut(idx: int) -> None:
+        cut_point = axis.path_px[idx]
+        lo = max(0, idx - 3)
+        hi = min(n - 1, idx + 3)
+        tangent = axis.path_px[hi] - axis.path_px[lo]
+        norm = float(np.linalg.norm(tangent))
+        if norm < 1e-9:
+            return
+        tangent = tangent / norm
+        nx, ny = -tangent[1], tangent[0]
+        signed_reference = (reference[0] - cut_point[0]) * nx + (reference[1] - cut_point[1]) * ny
+        signed = (xs - cut_point[0]) * nx + (ys - cut_point[1]) * ny
+        side = signed >= 0 if signed_reference >= 0 else signed <= 0
+        keep[:] &= side
+
+    if start > 0:
+        apply_cut(start)
+    if end < n - 1:
+        apply_cut(end)
+
+    return int(np.count_nonzero(mask_bool & keep))
+
+
 def _volume_mm3(s_mm: np.ndarray, w_mm: np.ndarray, start: int, end: int) -> float:
     """Volumen de seccion circular sobre el tramo ``[start, end]``, mas un
     casquete esferico en cada extremo que NO fue recortado (ver docstring
@@ -399,51 +471,56 @@ def measure_mask(mask: np.ndarray, mm_per_px: float, cfg: AppConfig) -> BananaMe
     -> ``trim_pedicel`` -> ``outer_curve`` (con las puntas ORIGINALES, robusta)
     recortada a los indices del fruto via ``_restrict_outer_to_fruit`` ->
     ``smoothed_arc_length_mm``. Calibre = 2 * radio en el punto medio del
-    eje YA recortado. Area = pixeles * mm_per_px**2. Volumen = suma de
-    discos circulares sobre el tramo del fruto (mas los casquetes de los
-    extremos sin recortar, ver ``_volume_mm3``).
+    eje YA recortado. Area = pixeles del tramo del fruto (``_fruit_pixel_count``)
+    * mm_per_px**2. Volumen = suma de discos circulares sobre el tramo del
+    fruto (mas los casquetes de los extremos sin recortar, ver
+    ``_volume_mm3``). Las cuatro magnitudes describen el mismo tramo del
+    fruto (ver docstring del modulo, ronda de revision 2).
 
-    Nunca lanza una excepcion: cualquier fallo en la cadena (mascara
-    degenerada, eje medial nulo, mascara que toca el borde) devuelve
-    ``None``, igual que el contrato de ``medial_axis_path`` (Task 6).
+    Devuelve ``None`` por una mascara GEOMETRICAMENTE degenerada -- cada
+    caso esta chequeado explicitamente abajo, ANTES del paso que lo usa, no
+    capturado con un ``except`` generico (ver docstring del modulo, ronda
+    de revision 2: capturar ciegamente convertiria un error de programacion
+    futuro en esta cadena en el mismo ``None`` silencioso que una mascara
+    degenerada). No lanza una excepcion por degeneracion geometrica; SI la
+    lanza si una llamada interna falla por cualquier otro motivo.
     """
-    try:
-        if touches_border(mask, cfg.border_margin_px):
-            return None
-
-        axis: MedialAxis | None = medial_axis_path(mask)
-        if axis is None:
-            return None
-
-        s_mm, w_mm = width_profile_mm(axis, mm_per_px)
-        if len(s_mm) < 2:
-            return None
-
-        start, end = trim_pedicel(s_mm, w_mm, cfg.pedicel_drop_ratio)
-        if end <= start:
-            return None
-
-        contour = _largest_contour_px(mask)
-        if contour is None or len(contour) < 2:
-            return None
-
-        full_outer = outer_curve(contour, axis.tips_px)
-        outer = _restrict_outer_to_fruit(full_outer, axis, start, end, len(w_mm))
-        codex_length_mm = smoothed_arc_length_mm(outer, mm_per_px)
-
-        mid = (start + end) // 2
-        caliper_mm = 2.0 * float(axis.radius_px[mid]) * mm_per_px
-
-        area_mm2 = float(np.count_nonzero(mask)) * (mm_per_px ** 2)
-
-        volume_mm3 = _volume_mm3(s_mm, w_mm, start, end)
-
-        return BananaMeasures(
-            codex_length_mm=codex_length_mm,
-            caliper_mm=caliper_mm,
-            area_mm2=area_mm2,
-            volume_mm3=volume_mm3,
-            width_profile=(s_mm, w_mm),
-        )
-    except Exception:
+    if touches_border(mask, cfg.border_margin_px):
         return None
+
+    axis: MedialAxis | None = medial_axis_path(mask)
+    if axis is None:
+        return None
+
+    s_mm, w_mm = width_profile_mm(axis, mm_per_px)
+    if len(s_mm) < 2:
+        return None
+
+    start, end = trim_pedicel(s_mm, w_mm, cfg.pedicel_drop_ratio)
+    if end <= start:
+        return None
+
+    contour = _largest_contour_px(mask)
+    if contour is None or len(contour) < 2:
+        return None
+
+    full_outer = outer_curve(contour, axis.tips_px)
+    if full_outer is None or len(full_outer) < 2:
+        return None
+    outer = _restrict_outer_to_fruit(full_outer, axis, start, end, len(w_mm))
+    codex_length_mm = smoothed_arc_length_mm(outer, mm_per_px)
+
+    mid = (start + end) // 2
+    caliper_mm = 2.0 * float(axis.radius_px[mid]) * mm_per_px
+
+    area_mm2 = float(_fruit_pixel_count(mask, axis, start, end, len(w_mm))) * (mm_per_px ** 2)
+
+    volume_mm3 = _volume_mm3(s_mm, w_mm, start, end)
+
+    return BananaMeasures(
+        codex_length_mm=codex_length_mm,
+        caliper_mm=caliper_mm,
+        area_mm2=area_mm2,
+        volume_mm3=volume_mm3,
+        width_profile=(s_mm, w_mm),
+    )
