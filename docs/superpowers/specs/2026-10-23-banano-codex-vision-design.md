@@ -131,9 +131,19 @@ Esto no es cosmético. Tres consecuencias con efecto directo en la precisión:
    todas las medidas. Se corrige restando el espesor a la altura efectiva. **El espesor
    debe medirse con calibrador y entrar como parámetro de configuración.**
 2. **El blanco no es blanco.** Es gris con textura de capas, y eso rompe la decodificación,
-   no solo la detección. **Medido en el montaje real:** con los `DetectorParameters` por
-   defecto, el marcador id 3 no se decodificaba en **ningún** frame; subíendo
-   `perspectiveRemovePixelPerCell` de 4 a 8 se decodifican **4/4 en todos**.
+   no solo la detección. **Medido sobre las siete capturas reales del montaje:**
+
+   | Parámetros | Resultado |
+   |---|---|
+   | Defectos puros de OpenCV (`perspectiveRemovePixelPerCell = 4`) | **se cae algún marcador en 5 de 7 capturas**, y no siempre el mismo: `[1,3]`, `[1,2,3]`, `[2,3,4]`, `[1,2]`… |
+   | Parámetros ajustados pero con `perspectiveRemovePixelPerCell = 4` | el id 3 no se decodifica en **ninguna** de las capturas sobre superficie pétrea |
+   | **`perspectiveRemovePixelPerCell = 8`** | **4/4 en las siete**, sobre cartulina blanca y sobre piedra |
+
+   Es decir: el fallo con los defectos puros es errático, no específico de un marcador — una
+   corrección sobre una versión anterior de este documento, que atribuía el fallo solo al
+   id 3 generalizando desde un único juego de parámetros. Lo robusto del hallazgo es lo
+   contrario de lo que sugería esa lectura: el ajuste recupera los cuatro marcadores incluso
+   en el montaje malo que luego se descartó.
 
    El porqué: al decodificar, ArUco endereza el marcador a un cuadrado canónico y decide
    cada bit muestreando una celda de N×N píxeles. Con N=4 son 16 píxeles por bit, y en una
