@@ -115,3 +115,33 @@ def test_all_four_real_markers_decode_in_every_capture():
     for frame in real_captures():
         detections = detect_markers(frame, cfg)
         assert {d.id for d in detections} == {1, 2, 3, 4}
+
+
+def test_detect_markers_collapses_a_repeated_id_to_one_detection():
+    """Dos marcadores fisicos distintos decodificados al mismo id (o, en el
+    montaje real, un candidato espurio de la veta de la impresion que
+    decodifica por casualidad al mismo id que un marcador genuino) deben
+    colapsar a una sola deteccion: el id nunca debe aparecer dos veces en la
+    lista que ve el resto del pipeline (Task 5 usa 4 esquinas por id como
+    correspondencias de una homografia; un id duplicado la corrompe
+    silenciosamente).
+    """
+    dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_50)
+    marker_img = cv2.aruco.generateImageMarker(dictionary, 1, 120)
+    marker_bgr = cv2.cvtColor(marker_img, cv2.COLOR_GRAY2BGR)
+    canvas = np.full((400, 400, 3), 255, np.uint8)
+    canvas[20:140, 20:140] = marker_bgr
+    canvas[220:340, 220:340] = marker_bgr
+
+    cfg = _cfg(marker_ids=[1, 2, 3, 4])
+    detections = detect_markers(canvas, cfg)
+
+    assert [d.id for d in detections] == [1]
+
+
+def test_calibration_state_counts_distinct_ids_not_list_length():
+    """3 marcadores distintos mas un duplicado de uno de ellos son 4 entradas
+    en la lista pero solo 3 ids distintos: debe clasificar DEGRADED, no OK.
+    """
+    detections = [fake_detection(1), fake_detection(2), fake_detection(3), fake_detection(1)]
+    assert calibration_state(detections) == CalibrationState.DEGRADED

@@ -88,13 +88,42 @@ def build_detector_params() -> cv2.aruco.DetectorParameters:
     return params
 
 
+def _dedupe_by_id(detections: list[MarkerDetection]) -> list[MarkerDetection]:
+    """Colapsa detecciones repetidas del mismo id a una sola por id.
+
+    Con 35-50 cuadrilateros candidatos espurios por frame (veta de la
+    impresion FDM), un candidato espurio puede decodificar por casualidad al
+    mismo id que el marcador fisico real, o el mismo marcador fisico puede
+    producir dos candidatos superpuestos que ambos decodifican. En cualquier
+    caso, dejar pasar el duplicado es peligroso rio abajo: Task 5 usa las 4
+    esquinas de cada marcador como correspondencias de puntos para una
+    homografia (16 puntos para 8 incognitas), asi que un id duplicado hace
+    que esos puntos se cuenten dos veces mientras otro marcador genuino falta
+    por completo, y que un frame con solo 3 marcadores distintos reporte
+    ``OK`` en vez de ``DEGRADED``.
+
+    Regla deterministica: gana la primera deteccion de cada id en el orden en
+    que aparece en ``detections`` (que, viniendo de ``detect_markers``, es el
+    orden que entrega ``detectMarkers``). No es "suerte de iteracion de
+    dict": un ``dict`` de Python preserva el orden de inserccion desde 3.7,
+    asi que "la primera que se vio" es exactamente lo que queda.
+    """
+    seen: dict[int, MarkerDetection] = {}
+    for detection in detections:
+        if detection.id not in seen:
+            seen[detection.id] = detection
+    return list(seen.values())
+
+
 def detect_markers(frame: np.ndarray, cfg: AppConfig) -> list[MarkerDetection]:
     """Detecta los marcadores ArUco del rig en ``frame``.
 
     Usa ``cfg.aruco_dictionary`` y los parametros de ``build_detector_params``
-    para decodificar, y descarta cualquier id decodificado que no figure en
+    para decodificar, descarta cualquier id decodificado que no figure en
     ``cfg.marker_ids`` -- un decode espurio de otro id (ruido de la textura
-    de la impresion) no debe llegar al resto del pipeline.
+    de la impresion) no debe llegar al resto del pipeline -- y deduplica por
+    id (ver ``_dedupe_by_id``): a lo sumo una ``MarkerDetection`` por id llega
+    al caller.
     """
     dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, cfg.aruco_dictionary))
     detector = cv2.aruco.ArucoDetector(dictionary, build_detector_params())
@@ -110,12 +139,19 @@ def detect_markers(frame: np.ndarray, cfg: AppConfig) -> list[MarkerDetection]:
         if marker_id not in allowed_ids:
             continue
         detections.append(MarkerDetection(id=marker_id, corners=marker_corners.reshape(4, 2)))
-    return detections
+    return _dedupe_by_id(detections)
 
 
 def calibration_state(detections: list[MarkerDetection]) -> CalibrationState:
-    """Clasifica cuanta confianza de calibracion sostienen las detecciones."""
-    count = len(detections)
+    """Clasifica cuanta confianza de calibracion sostienen las detecciones.
+
+    Cuenta ids distintos, no ``len(detections)``: si el caller pasara una
+    lista con un id duplicado (``detect_markers`` ya no deja pasar eso, pero
+    nada obliga a que todo caller futuro pase por ``detect_markers``), contar
+    entradas en vez de ids inflaria la confianza -- 3 marcadores genuinos mas
+    un duplicado no son 4 marcadores.
+    """
+    count = len(_dedupe_by_id(detections))
     if count >= 4:
         return CalibrationState.OK
     if count == 3:

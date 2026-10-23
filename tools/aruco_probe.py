@@ -22,12 +22,21 @@ Teclas:
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from collections import deque
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+# Permite ejecutar este script directamente (`python tools/aruco_probe.py`)
+# sin instalar el paquete: al correrlo como script, sys.path[0] es
+# tools/, no la raiz del repo, asi que `codex_caliper` no se encuentra sin
+# agregar explicitamente la raiz.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from codex_caliper.aruco_tools import build_detector_params  # noqa: E402
 
 MARKER_LENGTH_MM = 24.0  # lado del cuadrado negro completo
 STABILITY_WINDOW = 60  # frames sobre los que se mide la tasa de deteccion
@@ -50,38 +59,10 @@ def predefined_dictionaries() -> list[tuple[str, int]]:
     return sorted(((n, v) for v, n in seen.items()), key=lambda kv: kv[0])
 
 
-def build_detector_params() -> cv2.aruco.DetectorParameters:
-    """Parametros ajustados para marcadores impresos en 3D.
-
-    El blanco de la impresion FDM es un gris sucio con textura de capas, asi que
-    se ensancha el rango del umbralado adaptativo. El refinamiento subpixel es lo
-    que sostiene el objetivo de +/-1 mm del spec.
-
-    perspectiveRemovePixelPerCell = 8 (el defecto es 4) es el ajuste decisivo,
-    medido sobre las capturas reales del montaje: con el defecto, el marcador
-    id 3 no se decodificaba en ningun frame; con 8 se decodifican 4/4 siempre.
-
-    Al decodificar, ArUco endereza el marcador a un cuadrado canonico y decide
-    cada bit muestreando una celda de NxN pixeles. Con N=4 son 16 pixeles por
-    bit, y en una pieza impresa en FDM una sola linea de capa o una mota puede
-    dominar esa muestra. Con N=8 son 64 pixeles y la textura se promedia.
-
-    Subir errorCorrectionRate tambien hace que aparezca, pero es la palanca
-    equivocada: no mejora la muestra, sino que acepta mas bits erroneos. Con ~50
-    cuadrilateros espurios por frame procedentes de la veta de la superficie,
-    aflojar la validacion invita a falsos positivos. Mejor muestrear mejor que
-    validar menos.
-    """
-    params = cv2.aruco.DetectorParameters()
-    params.adaptiveThreshWinSizeMin = 3
-    params.adaptiveThreshWinSizeMax = 45
-    params.adaptiveThreshWinSizeStep = 6
-    params.minMarkerPerimeterRate = 0.02
-    params.maxMarkerPerimeterRate = 4.0
-    params.polygonalApproxAccuracyRate = 0.05
-    params.perspectiveRemovePixelPerCell = 8
-    params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-    return params
+# build_detector_params vive en codex_caliper.aruco_tools (se importa arriba):
+# esta sonda diagnostica el rig real, y si sus parametros de deteccion
+# divergieran de los que usa el pipeline, dejaria de diagnosticar el sistema
+# real para pasar a diagnosticar un primo suyo con otros parametros.
 
 
 def scan_dictionaries(frames: list[np.ndarray]) -> list[tuple[str, int, list[int], int, int]]:
