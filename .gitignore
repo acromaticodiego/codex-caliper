@@ -1,0 +1,22 @@
+# Entorno virtual del proyecto
+.venv/
+
+# Espacio de trabajo de los agentes (ledger, briefs, paquetes de revision)
+.superpowers/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Artefactos de calibracion generados en cada montaje
+config/intrinsics.json
+
+# Pesos de modelos descargados
+*.pt
+
+# Temporales
+.tmp/
