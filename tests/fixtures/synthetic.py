@@ -19,6 +19,14 @@ Geometria interna (coordenadas locales en mm, antes de pasar a pixeles):
   y el area total de ambas tapas equivale a un circulo completo
   (``pi*(w/2)**2``), que es justo el termino que aparece en la formula
   analitica del area.
+- El rasterizado ocurre en una grilla sobremuestreada (``_SUPERSAMPLE``
+  veces mas fina que ``mm_per_px``) que luego se reduce a la resolucion
+  pedida promediando cada bloque y fijando el pixel de salida si al menos
+  la mitad de su area quedo cubierta. ``cv2.circle`` en resolucion nativa
+  sesga el area hacia arriba (incluye generosamente los pixeles de borde);
+  ese sesgo crece cuanto mas grueso es ``mm_per_px`` frente al calibre, y
+  sobremuestrear lo mantiene por debajo del 1% en todo el rango de
+  parametros, no solo en el caso que se probo primero.
 - El pedicelo es un segundo barrido, de radio menor y constante, que
   arranca en la punta del extremo ``phi=-theta/2`` y se aleja en linea
   recta, tangente al arco en ese punto (no vuelve a curvarse).
@@ -45,6 +53,12 @@ _SAMPLE_STEP_FACTOR = 0.5
 _MIN_SAMPLES = 8
 # Bits de precision subpixel usados en cv2.circle via el parametro `shift`.
 _CIRCLE_SHIFT_BITS = 8
+# Factor de sobremuestreo del rasterizado: la grilla interna tiene
+# `_SUPERSAMPLE` veces mas pixeles por eje que `mm_per_px`, y se reduce
+# promediando con umbral de 50% de area cubierta (ver fix round 1, Task 2:
+# el rasterizado a resolucion nativa sobreestimaba el area hasta ~3.4% en
+# el extremo grueso/delgado del rango de parametros).
+_SUPERSAMPLE = 8
 
 _SHADOW_OFFSET_MM = (5.0, 5.0)
 _SHADOW_BGR = (120, 120, 120)
@@ -123,7 +137,18 @@ def _pedicel_stamps(radius_mm: float, arc_rad: float, pedicel_mm: float, pedicel
 
 
 def _rasterize(stamps: list[tuple[np.ndarray, float]], mm_per_px: float, canvas_margin_mm: float) -> np.ndarray:
-    """Convierte una lista de (centro_mm, radio_mm) en una mascara uint8 0/255."""
+    """Convierte una lista de (centro_mm, radio_mm) en una mascara uint8 0/255.
+
+    Rasteriza en una grilla ``_SUPERSAMPLE`` veces mas fina que ``mm_per_px``
+    y reduce con ``cv2.resize(..., INTER_AREA)``: sobre un factor entero
+    exacto, ``INTER_AREA`` promedia cada bloque de subpixeles sin
+    interpolar, asi que el valor resultante por pixel es exactamente la
+    fraccion de su area cubierta por la mascara. Umbralizar ese promedio en
+    128 (la mitad de 255) implementa la regla de "al menos la mitad del
+    area del pixel cubierta" y elimina el sesgo sistematico de
+    ``cv2.circle`` a resolucion nativa, que sobreestima el area tanto mas
+    cuanto mas grueso es ``mm_per_px`` frente al calibre del banano.
+    """
     xs = np.array([p[0] for p, _ in stamps])
     ys = np.array([p[1] for p, _ in stamps])
     radii = np.array([r for _, r in stamps])
@@ -135,17 +160,25 @@ def _rasterize(stamps: list[tuple[np.ndarray, float]], mm_per_px: float, canvas_
 
     width_px = max(1, int(math.ceil((max_x - min_x) / mm_per_px)))
     height_px = max(1, int(math.ceil((max_y - min_y) / mm_per_px)))
-    mask = np.zeros((height_px, width_px), dtype=np.uint8)
+
+    supersample = _SUPERSAMPLE
+    mm_per_px_hi = mm_per_px / supersample
+    width_px_hi = width_px * supersample
+    height_px_hi = height_px * supersample
+    hi_res_mask = np.zeros((height_px_hi, width_px_hi), dtype=np.uint8)
 
     shift = _CIRCLE_SHIFT_BITS
-    scale = (1 << shift) / mm_per_px
+    scale = (1 << shift) / mm_per_px_hi
     for (x_mm, y_mm), r_mm in stamps:
         if r_mm <= 0.0:
             continue
         cx = int(round((x_mm - min_x) * scale))
         cy = int(round((y_mm - min_y) * scale))
         r = int(round(r_mm * scale))
-        cv2.circle(mask, (cx, cy), r, 255, -1, cv2.LINE_8, shift)
+        cv2.circle(hi_res_mask, (cx, cy), r, 255, -1, cv2.LINE_8, shift)
+
+    coverage = cv2.resize(hi_res_mask, (width_px, height_px), interpolation=cv2.INTER_AREA)
+    mask = np.where(coverage >= 128, np.uint8(255), np.uint8(0))
 
     return mask
 
