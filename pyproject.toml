@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "banana-vision"
+name = "codex-caliper"
 version = "0.1.0"
-description = "Medicion de bananas contra CODEX STAN 205-1997 usando calibracion metrica con marcadores ArUco."
+description = "Codex-compliant banana dimensional measurement from a single camera, using ArUco markers for metric calibration."
 requires-python = ">=3.10"
 dependencies = [
     "opencv-python",
@@ -24,4 +24,4 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["banana_vision*"]
+include = ["codex_caliper*"]

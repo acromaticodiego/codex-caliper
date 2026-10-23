@@ -1,4 +1,4 @@
-from banana_vision.config import AppConfig
+from codex_caliper.config import AppConfig
 
 
 def test_effective_height_subtracts_marker_thickness():

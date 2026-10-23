@@ -52,7 +52,7 @@ con precisión, es una tarea a añadir, no un ajuste.
 ## File Structure
 
 ```
-banana_vision/
+codex_caliper/
   __init__.py
   config.py             AppConfig, MarkerLayout, carga/guardado JSON
   intrinsics.py         calibración intrínseca, persistencia, validación de zoom
@@ -90,11 +90,11 @@ tests/
 ### Task 1: Scaffold, configuración y buscador de diccionario ArUco
 
 **Files:**
-- Create: `pyproject.toml`, `banana_vision/__init__.py`, `banana_vision/config.py`, `tools/find_aruco_dictionary.py`
+- Create: `pyproject.toml`, `codex_caliper/__init__.py`, `codex_caliper/config.py`, `tools/find_aruco_dictionary.py`
 - Test: `tests/test_config.py`, `tests/test_find_dictionary.py`
 
 **Interfaces:**
-- Produces: `AppConfig` (dataclass con `marker_length_mm: float = 24.0`, `marker_thickness_mm: float`, `working_distance_mm: float = 270.0`, `canvas_mm_per_px: float = 0.2`, `temporal_window: int = 30`, `aruco_dictionary: str`, `marker_ids: list[int]`, `marker_layout: dict[int, tuple[float, float]]`), `AppConfig.load(path) -> AppConfig`, `AppConfig.save(path) -> None`, `AppConfig.effective_height_mm -> float`
+- Produces: `AppConfig` (dataclass con `marker_length_mm: float = 24.0`, `marker_thickness_mm: float`, `working_distance_mm: float = 270.0`, `canvas_mm_per_px: float = 0.2`, `temporal_window: int = 30`, `pedicel_drop_ratio: float = 0.45`, `border_margin_px: int = 2`, `aruco_dictionary: str`, `marker_ids: list[int]`, `marker_layout: dict[int, tuple[float, float]]`), `AppConfig.load(path) -> AppConfig`, `AppConfig.save(path) -> None`, `AppConfig.effective_height_mm -> float`
 - Produces: `find_dictionary(image: np.ndarray, expected_count: int = 4) -> list[DictionaryMatch]` en `tools/find_aruco_dictionary.py`, donde `DictionaryMatch` tiene `name: str`, `ids: list[int]`, `count: int`
 
 - [ ] **Step 1: Escribir los tests que fallan**
@@ -126,9 +126,11 @@ def test_returns_empty_list_when_no_markers_present():
 Run: `pytest tests/test_config.py tests/test_find_dictionary.py -v`
 Expected: FAIL — `ModuleNotFoundError`
 
-- [ ] **Step 3: Crear `pyproject.toml` con las dependencias del stack y declarar `banana_vision` como paquete**
+- [ ] **Step 3: Crear `pyproject.toml` con las dependencias del stack y declarar `codex_caliper` como paquete**
 
-- [ ] **Step 4: Implementar `AppConfig` en `banana_vision/config.py`**
+Dependencias: `opencv-python`, `numpy`, `scipy`, `scikit-image`, `ultralytics`, `PySide6`, `pandas`. De desarrollo: `pytest` y **`pytest-qt`** (las Tasks 16, 18 y 19 usan la fixture `qtbot`).
+
+- [ ] **Step 4: Implementar `AppConfig` en `codex_caliper/config.py`**
 
 Dataclass con los campos del bloque Interfaces, serializada a JSON. Las claves de `marker_layout` son enteros y JSON solo admite strings: convertir en ambos sentidos explícitamente.
 
@@ -144,7 +146,7 @@ Expected: PASS
 - [ ] **Step 7: Commit**
 
 ```bash
-git add pyproject.toml banana_vision/ tools/ tests/
+git add pyproject.toml codex_caliper/ tools/ tests/
 git commit -m "feat: project scaffold, config and ArUco dictionary finder"
 ```
 
@@ -159,9 +161,11 @@ Fixture de pruebas del que dependen todas las tareas de geometría. Un banano se
 - Test: `tests/test_synthetic_fixture.py`
 
 **Interfaces:**
-- Produces: `make_banana(radius_mm: float, arc_rad: float, width_mm: float, mm_per_px: float, pedicel_mm: float = 0.0, pedicel_width_mm: float = 0.0, canvas_margin_mm: float = 20.0) -> tuple[np.ndarray, GroundTruth]`
+- Produces: `make_banana(radius_mm: float, arc_rad: float, width_mm: float, mm_per_px: float, pedicel_mm: float = 0.0, pedicel_width_mm: float = 0.0, blossom_taper_mm: float = 0.0, canvas_margin_mm: float = 20.0) -> tuple[np.ndarray, GroundTruth]`
+  - `blossom_taper_mm` estrecha **gradualmente** el extremo opuesto al pedicelo a lo largo de esa longitud. Lo exige `test_gradual_blossom_taper_is_not_trimmed` de Task 8: el recorte debe distinguir la caída abrupta del pedicelo de la gradual del extremo floral. Con 0.0 el extremo queda redondeado como hasta ahora, y la verdad analítica no cambia.
 - Produces: `GroundTruth` dataclass con `centerline_length_mm`, `outer_length_mm`, `caliber_mm`, `area_mm2`, `volume_mm3`
-- Produces: `make_banana_scene(bananas: list[dict], mm_per_px: float) -> np.ndarray` — imagen BGR, bananos amarillos sobre fondo blanco con sombra gris desaturada
+- Produces: `make_banana_scene(bananas: list[dict], mm_per_px: float, markers: dict[int, tuple[float, float]] | None = None, marker_dict: str = "DICT_6X6_50") -> np.ndarray` — imagen BGR, bananos amarillos sobre fondo blanco con sombra gris desaturada
+  - Cuando `markers` no es `None`, dibuja un ArUco de 24 mm centrado en cada posición (mm) con `cv2.aruco.generateImageMarker`. Lo exige `test_end_to_end_on_a_synthetic_scene_recovers_ground_truth` de Task 14, que necesita una escena calibrable.
 
 Verdad analítica de la cápsula sobre arco de radio `R`, ángulo `θ`, ancho `w`:
 
@@ -231,7 +235,7 @@ git commit -m "test: synthetic banana fixture with closed-form ground truth"
 ### Task 3: Calibración intrínseca
 
 **Files:**
-- Create: `banana_vision/intrinsics.py`
+- Create: `codex_caliper/intrinsics.py`
 - Test: `tests/test_intrinsics.py`
 
 **Interfaces:**
@@ -270,7 +274,7 @@ def test_load_raises_when_image_size_differs_from_current_capture():
 Run: `pytest tests/test_intrinsics.py -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implementar `banana_vision/intrinsics.py`**
+- [ ] **Step 3: Implementar `codex_caliper/intrinsics.py`**
 
 `calibrate_from_corners` envuelve `cv2.calibrateCamera`. `require_compatible(size)` lanza `IntrinsicsMismatch` si la resolución no coincide — es la única verificación automática posible del cambio de zoom; el resto es el protocolo manual de la §5.2 del spec, que `zoom_note` registra en texto libre.
 
@@ -282,7 +286,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add banana_vision/intrinsics.py tests/test_intrinsics.py
+git add codex_caliper/intrinsics.py tests/test_intrinsics.py
 git commit -m "feat: intrinsic calibration with persistence and zoom guard"
 ```
 
@@ -291,7 +295,7 @@ git commit -m "feat: intrinsic calibration with persistence and zoom guard"
 ### Task 4: Detección de marcadores y guarda de intrínsecos
 
 **Files:**
-- Create: `banana_vision/aruco_tools.py`
+- Create: `codex_caliper/aruco_tools.py`
 - Test: `tests/test_aruco_tools.py`
 
 **Interfaces:**
@@ -336,7 +340,7 @@ def test_all_four_real_markers_decode_in_every_capture():
 Run: `pytest tests/test_aruco_tools.py -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implementar `banana_vision/aruco_tools.py`**
+- [ ] **Step 3: Implementar `codex_caliper/aruco_tools.py`**
 
 `build_detector_params` ajusta `adaptiveThreshWinSizeMin/Max`, `minMarkerPerimeterRate`, fija **`perspectiveRemovePixelPerCell = 8`** y activa `CORNER_REFINE_SUBPIX`. El refinamiento subpíxel sostiene el objetivo de ±1 mm; el muestreo por celda es lo que hace decodificable el marcador id 3. `detect_markers` filtra por `cfg.marker_ids`.
 
@@ -350,7 +354,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add banana_vision/aruco_tools.py tests/test_aruco_tools.py
+git add codex_caliper/aruco_tools.py tests/test_aruco_tools.py
 git commit -m "feat: ArUco detection tuned for 3D-printed markers"
 ```
 
@@ -359,7 +363,7 @@ git commit -m "feat: ArUco detection tuned for 3D-printed markers"
 ### Task 5: Homografía del plano y rectificación
 
 **Files:**
-- Create: `banana_vision/homography.py`
+- Create: `codex_caliper/homography.py`
 - Test: `tests/test_homography.py`
 
 **Interfaces:**
@@ -402,7 +406,7 @@ def test_degrades_to_twelve_points_with_three_markers():
 Run: `pytest tests/test_homography.py -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implementar `banana_vision/homography.py`**
+- [ ] **Step 3: Implementar `codex_caliper/homography.py`**
 
 `world_points_for` genera, para cada marcador detectado, sus 4 esquinas en milímetros a partir del centro declarado en `cfg.marker_layout` y de `MARKER_LENGTH_MM`, en el mismo orden que devuelve OpenCV. `compute_plane_calibration` llama a `cv2.findHomography` con `method=0` (todos los puntos son de confianza; no hay outliers que descartar con RANSAC) y calcula `residual_mm` reproyectando los puntos del mundo y midiendo el RMS en milímetros. `rectify` envuelve `cv2.warpPerspective`.
 
@@ -414,7 +418,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add banana_vision/homography.py tests/test_homography.py
+git add codex_caliper/homography.py tests/test_homography.py
 git commit -m "feat: per-frame plane homography with residual and graceful degradation"
 ```
 
@@ -423,7 +427,7 @@ git commit -m "feat: per-frame plane homography with residual and graceful degra
 ### Task 6: Eje medial, poda y perfil de grosor
 
 **Files:**
-- Create: `banana_vision/geometry/__init__.py`, `banana_vision/geometry/medial.py`
+- Create: `codex_caliper/geometry/__init__.py` (vacío — Tasks 7 y 8 importan de los submódulos, no reexportan), `codex_caliper/geometry/medial.py`
 - Test: `tests/test_medial.py`
 
 **Interfaces:**
@@ -469,7 +473,7 @@ def test_returns_none_for_degenerate_masks(mask):
 Run: `pytest tests/test_medial.py -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implementar `medial_axis_path` en `banana_vision/geometry/medial.py`**
+- [ ] **Step 3: Implementar `medial_axis_path` en `codex_caliper/geometry/medial.py`**
 
 Usar `skimage.morphology.medial_axis(mask, return_distance=True)`: devuelve esqueleto y transformada de distancia en una sola llamada, y el valor de distancia en cada píxel del esqueleto es el radio del círculo inscrito, o sea medio ancho local.
 
@@ -483,7 +487,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add banana_vision/geometry/ tests/test_medial.py
+git add codex_caliper/geometry/ tests/test_medial.py
 git commit -m "feat: medial axis with geodesic main path and width profile"
 ```
 
@@ -492,7 +496,7 @@ git commit -m "feat: medial axis with geodesic main path and width profile"
 ### Task 7: Curva exterior y longitud Codex con corrección de escalonado
 
 **Files:**
-- Create: `banana_vision/geometry/outline.py`
+- Create: `codex_caliper/geometry/outline.py`
 - Test: `tests/test_outline.py`
 
 **Interfaces:**
@@ -536,7 +540,7 @@ def test_outer_curve_is_longer_than_the_medial_axis():
 Run: `pytest tests/test_outline.py -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implementar `banana_vision/geometry/outline.py`**
+- [ ] **Step 3: Implementar `codex_caliper/geometry/outline.py`**
 
 `split_contour_at_tips` localiza los índices del contorno más cercanos a cada punta y parte la secuencia cerrada en dos cadenas. `smoothed_arc_length_mm` ajusta un spline suavizante con `scipy.interpolate.splprep` sobre la cadena y lo integra; sin este paso la longitud de una cadena 8-conexa sobrestima la de una curva suave por el efecto escalera.
 
@@ -548,7 +552,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add banana_vision/geometry/outline.py tests/test_outline.py
+git add codex_caliper/geometry/outline.py tests/test_outline.py
 git commit -m "feat: Codex outer-curve length with staircase correction"
 ```
 
@@ -557,7 +561,7 @@ git commit -m "feat: Codex outer-curve length with staircase correction"
 ### Task 8: Recorte de pedicelo, calibre, área y volumen
 
 **Files:**
-- Create: `banana_vision/geometry/measures.py`
+- Create: `codex_caliper/geometry/measures.py`
 - Test: `tests/test_measures.py`
 
 **Interfaces:**
@@ -622,7 +626,7 @@ Expected: PASS
 - [ ] **Step 6: Commit**
 
 ```bash
-git add banana_vision/geometry/measures.py tests/test_measures.py
+git add codex_caliper/geometry/measures.py tests/test_measures.py
 git commit -m "feat: pedicel trimming, caliper, area and volume"
 ```
 
@@ -631,7 +635,7 @@ git commit -m "feat: pedicel trimming, caliper, area and volume"
 ### Task 9: Corrección de paralaje
 
 **Files:**
-- Create: `banana_vision/parallax.py`
+- Create: `codex_caliper/parallax.py`
 - Test: `tests/test_parallax.py`
 
 **Interfaces:**
@@ -669,7 +673,7 @@ def test_volume_scales_with_the_cube_of_the_factor():
 Run: `pytest tests/test_parallax.py -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implementar `banana_vision/parallax.py`**
+- [ ] **Step 3: Implementar `codex_caliper/parallax.py`**
 
 `scale_factor = (H_ef - h/2) / H_ef`. `correct_measures` itera: tomar el calibre actual como `h`, calcular el factor, reescalar longitud y calibre por `f`, área por `f²` y volumen por `f³`, y repetir.
 
@@ -681,7 +685,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add banana_vision/parallax.py tests/test_parallax.py
+git add codex_caliper/parallax.py tests/test_parallax.py
 git commit -m "feat: iterative parallax correction from measured thickness"
 ```
 
@@ -690,7 +694,7 @@ git commit -m "feat: iterative parallax correction from measured thickness"
 ### Task 10: Veredicto Codex y grado comercial
 
 **Files:**
-- Create: `banana_vision/codex.py`
+- Create: `codex_caliper/codex.py`
 - Test: `tests/test_codex.py`
 
 **Interfaces:**
@@ -721,7 +725,7 @@ def test_no_commercial_grade_below_the_minimum():
 Run: `pytest tests/test_codex.py -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implementar `banana_vision/codex.py`**
+- [ ] **Step 3: Implementar `codex_caliper/codex.py`**
 
 Umbrales de las Global Constraints. `commercial_grade` es el calibre truncado a entero cuando alcanza los 34 mm del mínimo comercial, `None` por debajo.
 
@@ -733,7 +737,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add banana_vision/codex.py tests/test_codex.py
+git add codex_caliper/codex.py tests/test_codex.py
 git commit -m "feat: CODEX STAN 205-1997 verdict and commercial grade"
 ```
 
@@ -742,7 +746,7 @@ git commit -m "feat: CODEX STAN 205-1997 verdict and commercial grade"
 ### Task 11: Agregación temporal e incertidumbre
 
 **Files:**
-- Create: `banana_vision/aggregation.py`
+- Create: `codex_caliper/aggregation.py`
 - Test: `tests/test_aggregation.py`
 
 **Interfaces:**
@@ -782,7 +786,7 @@ def test_window_slides_and_drops_the_oldest_sample():
 Run: `pytest tests/test_aggregation.py -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implementar `banana_vision/aggregation.py`**
+- [ ] **Step 3: Implementar `codex_caliper/aggregation.py`**
 
 Un `collections.deque(maxlen=window)` por `track_id`. Mediana por su robustez frente a frames malos — con media, un solo frame con la máscara rota arrastra el resultado. `locked` cuando el buffer está lleno **y** la desviación está por debajo de `lock_std_mm`.
 
@@ -794,7 +798,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add banana_vision/aggregation.py tests/test_aggregation.py
+git add codex_caliper/aggregation.py tests/test_aggregation.py
 git commit -m "feat: temporal median aggregation with reported uncertainty"
 ```
 
@@ -803,7 +807,7 @@ git commit -m "feat: temporal median aggregation with reported uncertainty"
 ### Task 12: Detección YOLO con tracking y reasociación
 
 **Files:**
-- Create: `banana_vision/detection.py`
+- Create: `codex_caliper/detection.py`
 - Test: `tests/test_detection.py`
 
 **Interfaces:**
@@ -843,7 +847,7 @@ def test_adjacent_masks_are_detected():
 Run: `pytest tests/test_detection.py -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implementar `banana_vision/detection.py`**
+- [ ] **Step 3: Implementar `codex_caliper/detection.py`**
 
 `BananaDetector` acepta el modelo por inyección para que los tests usen un doble y no descarguen pesos. Internamente llama a `model.track(frame_resized, persist=True, classes=[46])` y reescala las máscaras al tamaño del frame original. `every_n_frames` reutiliza las instancias previas entre inferencias — los objetos están quietos, así que no se pierde nada y es el respaldo para equipos sin GPU. `masks_are_adjacent` dilata y comprueba intersección.
 
@@ -855,7 +859,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add banana_vision/detection.py tests/test_detection.py
+git add codex_caliper/detection.py tests/test_detection.py
 git commit -m "feat: YOLO segmentation with tracking, frame skipping and centroid fallback"
 ```
 
@@ -864,7 +868,7 @@ git commit -m "feat: YOLO segmentation with tracking, frame skipping and centroi
 ### Task 13: Refinamiento de contorno por saturación
 
 **Files:**
-- Create: `banana_vision/segmentation.py`
+- Create: `codex_caliper/segmentation.py`
 - Test: `tests/test_segmentation.py`
 
 **Interfaces:**
@@ -896,7 +900,7 @@ def test_returns_none_when_nothing_saturated_is_found():
 Run: `pytest tests/test_segmentation.py -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implementar `refine_mask` en `banana_vision/segmentation.py`**
+- [ ] **Step 3: Implementar `refine_mask` en `codex_caliper/segmentation.py`**
 
 Recortar al bbox de `coarse_mask`, pasar a HSV y umbralar el **canal de saturación** con Otsu cuando `saturation_threshold is None`. Limpiar con apertura y cierre morfológicos y quedarse con el componente conexo mayor. No usar luminancia: sobre cartulina blanca la sombra es oscura pero desaturada, así que por saturación se queda con el fondo y por luminancia entraría en la máscara.
 
@@ -908,7 +912,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add banana_vision/segmentation.py tests/test_segmentation.py
+git add codex_caliper/segmentation.py tests/test_segmentation.py
 git commit -m "feat: saturation-channel contour refinement"
 ```
 
@@ -917,7 +921,7 @@ git commit -m "feat: saturation-channel contour refinement"
 ### Task 14: Orquestación del pipeline
 
 **Files:**
-- Create: `banana_vision/pipeline.py`
+- Create: `codex_caliper/pipeline.py`
 - Test: `tests/test_pipeline.py`
 
 **Interfaces:**
@@ -957,7 +961,7 @@ def test_weight_is_none_until_a_density_is_supplied():
 Run: `pytest tests/test_pipeline.py -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implementar `Pipeline.process` en `banana_vision/pipeline.py`**
+- [ ] **Step 3: Implementar `Pipeline.process` en `codex_caliper/pipeline.py`**
 
 Orden por frame: `undistort` → `detect_markers` → `compute_plane_calibration` (abortar con warning si es `None`) → `rectify` → `detector.detect` sobre el rectificado → `CentroidReassigner` → comprobar `masks_are_adjacent` entre pares (abortar con warning si hay alguno) → por instancia `refine_mask` → `measure_mask` → `correct_measures` → `aggregator.push` → `codex.evaluate` → peso desde el volumen y la densidad si la hay. Acumular avisos en `warnings` en lugar de lanzar excepciones.
 
@@ -969,7 +973,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add banana_vision/pipeline.py tests/test_pipeline.py
+git add codex_caliper/pipeline.py tests/test_pipeline.py
 git commit -m "feat: per-frame pipeline orchestration"
 ```
 
@@ -978,11 +982,12 @@ git commit -m "feat: per-frame pipeline orchestration"
 ### Task 15: Validación, regresión de densidad y métricas de error
 
 **Files:**
-- Create: `banana_vision/validation.py`
+- Create: `codex_caliper/validation.py`
 - Test: `tests/test_validation.py`
 
 **Interfaces:**
 - Produces: `ValidationLog(path)` con `record(sample_id: str, measures: BananaMeasures, actual_weight_g: float)`, `to_frame() -> pd.DataFrame`
+  - Recibe `BananaMeasures`, no `TrackAggregate`: este módulo es independiente y comprobable solo. Es la `ValidationView` de Task 19 la que construye un `BananaMeasures` a partir del `TrackAggregate` fijado.
 - Produces: `fit_density(frame) -> DensityFit` con `g_per_cm3: float`, `r_squared: float`, `n: int`
 - Produces: `error_metrics(frame, density: DensityFit) -> ErrorMetrics` con `mae_g`, `mape_pct`, `r_squared`
 - Produces: `dimensional_check(measured_mm, reference_mm) -> float` — para los patrones planos (tarjeta ISO 85.60 × 53.98 mm, ArUco de 24.0 mm)
@@ -1018,7 +1023,7 @@ def test_fit_density_requires_a_minimum_sample_size():
 Run: `pytest tests/test_validation.py -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implementar `banana_vision/validation.py`**
+- [ ] **Step 3: Implementar `codex_caliper/validation.py`**
 
 `fit_density` hace regresión lineal por el origen de peso contra volumen: la pendiente es la densidad efectiva del sistema, que es más honesto y más preciso que tomar una densidad de tabla. Exigir al menos 10 muestras. `error_metrics` calcula MAE, MAPE y R² sobre el peso predicho.
 
@@ -1030,7 +1035,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add banana_vision/validation.py tests/test_validation.py
+git add codex_caliper/validation.py tests/test_validation.py
 git commit -m "feat: validation log, fitted density and error metrics"
 ```
 
@@ -1039,7 +1044,7 @@ git commit -m "feat: validation log, fitted density and error metrics"
 ### Task 16: Captura de cámara en hilo propio
 
 **Files:**
-- Create: `banana_vision/camera.py`
+- Create: `codex_caliper/camera.py`
 - Test: `tests/test_camera.py`
 
 **Interfaces:**
@@ -1068,7 +1073,7 @@ def test_actual_size_reports_what_the_device_granted_not_what_was_asked():
 Run: `pytest tests/test_camera.py -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implementar `banana_vision/camera.py`**
+- [ ] **Step 3: Implementar `codex_caliper/camera.py`**
 
 `QThread` con bucle de lectura y señal Qt. `actual_size` lee las propiedades tras configurarlas, porque el driver puede no conceder lo pedido — y los intrínsecos dependen de la resolución real (Task 3, `require_compatible`).
 
@@ -1080,7 +1085,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add banana_vision/camera.py tests/test_camera.py
+git add codex_caliper/camera.py tests/test_camera.py
 git commit -m "feat: threaded camera capture"
 ```
 
@@ -1089,7 +1094,7 @@ git commit -m "feat: threaded camera capture"
 ### Task 17: Overlay de cotas sobre el frame
 
 **Files:**
-- Create: `banana_vision/ui/overlay.py`
+- Create: `codex_caliper/ui/overlay.py`
 - Test: `tests/test_overlay.py`
 
 **Interfaces:**
@@ -1126,7 +1131,7 @@ def test_unlocked_results_are_drawn_with_a_progress_indicator():
 Run: `pytest tests/test_overlay.py -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implementar `banana_vision/ui/overlay.py`**
+- [ ] **Step 3: Implementar `codex_caliper/ui/overlay.py`**
 
 `format_measurement` deriva el número de decimales de la incertidumbre — es la defensa contra la falsa precisión del spec. `draw_results` trabaja sobre una copia y ancla cada etiqueta al bbox de su banano, de modo que los números sigan al objeto cuando se mueve.
 
@@ -1138,7 +1143,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add banana_vision/ui/overlay.py tests/test_overlay.py
+git add codex_caliper/ui/overlay.py tests/test_overlay.py
 git commit -m "feat: on-frame measurement overlay with precision guard"
 ```
 
@@ -1147,7 +1152,7 @@ git commit -m "feat: on-frame measurement overlay with precision guard"
 ### Task 18: Ventana principal, vista de video y panel lateral
 
 **Files:**
-- Create: `banana_vision/ui/main_window.py`, `banana_vision/ui/video_view.py`, `banana_vision/ui/side_panel.py`
+- Create: `codex_caliper/ui/main_window.py`, `codex_caliper/ui/video_view.py`, `codex_caliper/ui/side_panel.py`
 - Test: `tests/test_ui_layout.py`
 
 **Interfaces:**
@@ -1199,7 +1204,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add banana_vision/ui/ tests/test_ui_layout.py
+git add codex_caliper/ui/ tests/test_ui_layout.py
 git commit -m "feat: main window with video-dominant layout"
 ```
 
@@ -1208,8 +1213,8 @@ git commit -m "feat: main window with video-dominant layout"
 ### Task 19: Vistas de calibración y validación
 
 **Files:**
-- Create: `banana_vision/ui/calibration_view.py`, `banana_vision/ui/validation_view.py`
-- Modify: `banana_vision/ui/main_window.py` — navegación entre vistas
+- Create: `codex_caliper/ui/calibration_view.py`, `codex_caliper/ui/validation_view.py`
+- Modify: `codex_caliper/ui/main_window.py` — navegación entre vistas
 - Test: `tests/test_calibration_view.py`, `tests/test_validation_view.py`
 
 **Interfaces:**
@@ -1263,7 +1268,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add banana_vision/ui/ tests/
+git add codex_caliper/ui/ tests/
 git commit -m "feat: calibration and validation views"
 ```
 
@@ -1272,7 +1277,7 @@ git commit -m "feat: calibration and validation views"
 ### Task 20: Punto de entrada y prueba en hardware real
 
 **Files:**
-- Create: `banana_vision/__main__.py`, `README.md`
+- Create: `codex_caliper/__main__.py`, `README.md`
 - Test: `tests/test_entrypoint.py`
 
 **Interfaces:**
@@ -1294,7 +1299,7 @@ def test_main_reports_a_clear_error_when_the_camera_cannot_be_opened():
 Run: `pytest tests/test_entrypoint.py -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implementar `banana_vision/__main__.py`**
+- [ ] **Step 3: Implementar `codex_caliper/__main__.py`**
 
 Argumentos: `--config`, `--camera`, `--intrinsics`. Fallar con mensaje claro y código 1, nunca con un stack trace.
 
@@ -1319,6 +1324,6 @@ Sin tests automáticos — comprobar a mano y anotar los resultados:
 - [ ] **Step 7: Commit**
 
 ```bash
-git add banana_vision/__main__.py README.md tests/test_entrypoint.py
+git add codex_caliper/__main__.py README.md tests/test_entrypoint.py
 git commit -m "feat: entrypoint and setup documentation"
 ```
