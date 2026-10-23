@@ -35,15 +35,65 @@ margen de sobra sobre el ruido de fondo (0.016). El perfil crudo tiene
 ademas un artefacto puntual en la ultima muestra de una punta afilada (el
 refinamiento de punta de ``medial.py`` asume una tapa convexa redondeada,
 no un cono, y se desvia un poco justo en el ultimo punto): por eso la
-derivada se calcula sobre ``w`` suavizado con una media movil corta
-(``_SMOOTH_WINDOW``), no sobre el perfil crudo -- un pico aislado de 1-2
-muestras no debe disparar un corte.
+derivada se calcula sobre ``w`` suavizado con una media movil corta, no
+sobre el perfil crudo -- un pico aislado de 1-2 muestras no debe disparar
+un corte.
+
+**Ronda de revision 1 -- escala de la ventana de suavizado.** La ventana
+original era un numero fijo de MUESTRAS (``_SMOOTH_WINDOW = 5``), pero la
+cantidad de muestras por milimetro depende de la resolucion del esqueleto
+(``medial.py``, factor de reduccion 2) y de ``mm_per_px``, no es una
+propiedad del banano. ``_SMOOTH_WINDOW_MM = 2.0`` fija la ventana en
+MILIMETROS y la convierte a muestras segun el espaciado real de ``s_mm``
+en cada llamada -- asi el suavizado cubre la misma distancia fisica sin
+importar la resolucion de captura. (La derivada normalizada en si --
+``|dw/ds| / w_max`` -- ya era adimensional respecto del calibre del fruto
+desde la primera version; lo que no era invariante de escala era esta
+ventana. Ver el informe de la ronda de revision 1 para la medicion que
+mostro que, aun con la derivada ya normalizada, el criterio solo fallaba
+por una inestabilidad distinta, en la reconstruccion de la curva exterior
+recortada -- corregida abajo, no aqui.)
 
 El punto de corte no es donde la derivada cruza el umbral por primera vez
 (eso cae a mitad de la subida, con el ancho todavia muy por debajo del
 calibre del fruto), sino donde el ancho TERMINA de subir y se estabiliza
 cerca del calibre maximo (``_PLATEAU_FRACTION``): ese es el punto donde el
 perfil vuelve a describir fruto, no la transicion.
+
+Longitud recortada: por que no se vuelve a partir el contorno completo
+------------------------------------------------------------------------
+La primera version de ``measure_mask`` llamaba a
+``outer_curve(contour, (axis.path_px[start], axis.path_px[end]))`` --
+re-partir el CONTORNO CERRADO COMPLETO usando los puntos recortados del eje
+medial como si fueran puntas nuevas. ``split_contour_at_tips`` busca, para
+cada punta, el punto del contorno mas cercano; en una punta real (centro de
+una tapa redondeada) esa busqueda es robusta porque el punto esta rodeado
+de contorno en todas direcciones de forma mas o menos simetrica. Pero el
+punto recortado NO es una punta: cae a mitad del cuerpo del fruto, cerca de
+la union con el pedicelo, donde el contorno tiene una geometria mas
+complicada (el cuerpo ancho y el tubo delgado del pedicelo conviven a
+distancias similares del punto). Medido: para radius=220, arc=0.85,
+mm_per_px=0.2, pedicel_mm=25, variando solo el calibre del fruto, la
+longitud recortada resultante se disparaba por encima de la del banano SIN
+recortar en vez de quedar por debajo (w=12/pedicel_width=3: +13.7%;
+w=8/pedicel_width=3: +20.0%; ver informe de la ronda de revision 1) --la
+busqueda de "punto mas cercano" elegia, para calibres chicos, el lado
+equivocado del contorno y dejaba todo el pedicelo adentro de la cadena
+"exterior". ``trim_pedicel`` SI identificaba el indice correcto en todos
+los casos (verificado por separado); el defecto estaba en como ese indice
+se traducia a una curva exterior.
+
+La correccion: en vez de re-partir el contorno completo, se usa la curva
+exterior YA seleccionada de forma robusta con las puntas ORIGINALES del eje
+(``outer_curve(contour, axis.tips_px)``, el mismo camino que Task 7 valido)
+y se la recorta buscando el punto mas cercano DENTRO de esa cadena ya
+ordenada -- una busqueda de vecino mas cercano en una secuencia 1D simple,
+sin la ambiguedad topologica de partir un contorno cerrado por un punto
+interior. Medido en los mismos cuatro calibres (36, 24, 12, 8 mm, pedicelo
+de 25 mm): la diferencia entre la longitud sin recortar y la recortada,
+en la MISMA mascara, cae entre 87% y 105% de los 25 mm del pedicelo -- sin
+ningun signo invertido ni disparo instable (ver ``tests/test_measures.py``
+y el informe de la ronda de revision 1 para la tabla completa).
 
 Calibre, area y volumen
 ------------------------
@@ -88,11 +138,12 @@ _DERIVATIVE_THRESHOLD_PER_MM = 0.04
 # considerar que el perfil "se estabilizo" de vuelta en el cuerpo del fruto.
 _PLATEAU_FRACTION = 0.9
 
-# Ventana de la media movil que suaviza w(s) antes de derivar: filtra el
-# pico aislado de 1-2 muestras en la ultima punta de un adelgazamiento
-# conico (ver docstring del modulo), sin borrar la transicion sostenida del
-# pedicelo (que dura decenas de muestras).
-_SMOOTH_WINDOW = 5
+# Ventana de la media movil que suaviza w(s) antes de derivar, en
+# MILIMETROS (no muestras -- ver docstring del modulo, ronda de revision
+# 1): filtra el pico aislado de 1-2 muestras en la ultima punta de un
+# adelgazamiento conico, sin borrar la transicion sostenida del pedicelo
+# (que dura decenas de milimetros).
+_SMOOTH_WINDOW_MM = 2.0
 
 # Factor del volumen de un casquete esferico de radio r: (2/3)*pi*r**3 (la
 # mitad de la esfera completa, (4/3)*pi*r**3). Se usa para compensar que el
@@ -117,11 +168,27 @@ class BananaMeasures:
     width_profile: tuple[np.ndarray, np.ndarray]
 
 
-def _smooth(w_mm: np.ndarray, window: int) -> np.ndarray:
-    """Media movil corta de ``w_mm``, con relleno por borde (``edge``) para
-    no acortar el arreglo ni introducir sesgo en los extremos."""
+def _smooth(w_mm: np.ndarray, s_mm: np.ndarray, window_mm: float) -> np.ndarray:
+    """Media movil de ``w_mm`` sobre una ventana de ``window_mm`` MILIMETROS
+    (no muestras -- ver docstring del modulo, ronda de revision 1), con
+    relleno por borde (``edge``) para no acortar el arreglo ni introducir
+    sesgo en los extremos.
+
+    La ventana en milimetros se convierte a una cantidad de muestras segun
+    el espaciado medio real de ``s_mm`` en esta llamada, para que cubra la
+    misma distancia fisica sin importar la resolucion de captura
+    (``mm_per_px``) ni el factor de reduccion del esqueleto.
+    """
     n = len(w_mm)
-    if window <= 1 or n < window:
+    if n < 3:
+        return w_mm.copy()
+    span_mm = float(s_mm[-1] - s_mm[0])
+    if span_mm <= 0.0:
+        return w_mm.copy()
+    step_mm = span_mm / (n - 1)
+    window = max(1, int(round(window_mm / step_mm)))
+    window = min(window, n - 1 if n % 2 == 0 else n)
+    if window <= 1:
         return w_mm.copy()
     kernel = np.ones(window) / window
     pad = window // 2
@@ -164,7 +231,7 @@ def trim_pedicel(s_mm: np.ndarray, w_mm: np.ndarray, drop_ratio: float = 0.45) -
     # un adelgazamiento conico no debe disparar un corte, pero el cruce de
     # umbral de ``drop_ratio * w_max`` sigue decidiendose con el ancho
     # CRUDO (no tiene sentido desplazar donde el ancho realmente cruza).
-    smoothed = _smooth(w_mm, _SMOOTH_WINDOW)
+    smoothed = _smooth(w_mm, s_mm, _SMOOTH_WINDOW_MM)
 
     def _avg_slope(lo: int, hi: int) -> float:
         return (smoothed[hi] - smoothed[lo]) / (s_mm[hi] - s_mm[lo])
@@ -252,6 +319,56 @@ def _largest_contour_px(mask: np.ndarray) -> np.ndarray | None:
     return largest.reshape(-1, 2).astype(np.float64)
 
 
+def _restrict_outer_to_fruit(
+    full_outer: np.ndarray, axis: MedialAxis, start: int, end: int, n: int
+) -> np.ndarray:
+    """Recorta ``full_outer`` (la curva exterior YA seleccionada de forma
+    robusta con las puntas ORIGINALES del eje medial, via
+    ``outer_curve(contour, axis.tips_px)``) a los indices del fruto.
+
+    No vuelve a partir el contorno cerrado completo por los puntos
+    recortados (eso fue el defecto de la ronda de revision 1: el punto
+    recortado cae a mitad del cuerpo, no en una punta, y la busqueda de
+    "punto mas cercano" sobre el contorno completo es ambigua/inestable
+    alli -- ver docstring del modulo). En cambio, busca el punto mas
+    cercano DENTRO de la cadena ``full_outer`` ya ordenada (una busqueda de
+    vecino mas cercano en una secuencia 1D, sin la ambiguedad topologica de
+    un contorno cerrado) y conserva el tramo entre esos puntos.
+    """
+    if start == 0 and end == n - 1:
+        return full_outer
+
+    def nearest_chain_index(point: np.ndarray) -> int:
+        diffs = full_outer - point
+        return int(np.argmin(np.sum(diffs * diffs, axis=1)))
+
+    # orientacion de la cadena respecto al orden del eje: el indice de la
+    # cadena, crece en el mismo sentido que el indice del eje, o al reves?
+    dist_chain_start_to_tip0 = float(np.linalg.norm(full_outer[0] - axis.tips_px[0]))
+    dist_chain_end_to_tip0 = float(np.linalg.norm(full_outer[-1] - axis.tips_px[0]))
+    chain_increases_with_axis = dist_chain_start_to_tip0 <= dist_chain_end_to_tip0
+
+    lo_bound = 0
+    hi_bound = len(full_outer) - 1
+
+    if start > 0:
+        i = nearest_chain_index(axis.path_px[start])
+        if chain_increases_with_axis:
+            lo_bound = max(lo_bound, i)
+        else:
+            hi_bound = min(hi_bound, i)
+    if end < n - 1:
+        i = nearest_chain_index(axis.path_px[end])
+        if chain_increases_with_axis:
+            hi_bound = min(hi_bound, i)
+        else:
+            lo_bound = max(lo_bound, i)
+
+    if lo_bound >= hi_bound:
+        return full_outer
+    return full_outer[lo_bound : hi_bound + 1]
+
+
 def _volume_mm3(s_mm: np.ndarray, w_mm: np.ndarray, start: int, end: int) -> float:
     """Volumen de seccion circular sobre el tramo ``[start, end]``, mas un
     casquete esferico en cada extremo que NO fue recortado (ver docstring
@@ -279,8 +396,9 @@ def measure_mask(mask: np.ndarray, mm_per_px: float, cfg: AppConfig) -> BananaMe
     """Mide un banano a partir de su mascara binaria.
 
     Encadena: ``touches_border`` -> ``medial_axis_path`` -> ``width_profile_mm``
-    -> ``trim_pedicel`` -> ``outer_curve`` recortada a los indices del fruto
-    -> ``smoothed_arc_length_mm``. Calibre = 2 * radio en el punto medio del
+    -> ``trim_pedicel`` -> ``outer_curve`` (con las puntas ORIGINALES, robusta)
+    recortada a los indices del fruto via ``_restrict_outer_to_fruit`` ->
+    ``smoothed_arc_length_mm``. Calibre = 2 * radio en el punto medio del
     eje YA recortado. Area = pixeles * mm_per_px**2. Volumen = suma de
     discos circulares sobre el tramo del fruto (mas los casquetes de los
     extremos sin recortar, ver ``_volume_mm3``).
@@ -309,8 +427,8 @@ def measure_mask(mask: np.ndarray, mm_per_px: float, cfg: AppConfig) -> BananaMe
         if contour is None or len(contour) < 2:
             return None
 
-        trimmed_tips = (axis.path_px[start], axis.path_px[end])
-        outer = outer_curve(contour, trimmed_tips)
+        full_outer = outer_curve(contour, axis.tips_px)
+        outer = _restrict_outer_to_fruit(full_outer, axis, start, end, len(w_mm))
         codex_length_mm = smoothed_arc_length_mm(outer, mm_per_px)
 
         mid = (start + end) // 2
