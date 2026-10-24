@@ -94,6 +94,38 @@ Dos cambios, ninguno sobre el recorte en si:
    (igual que antes, pero sin la red de seguridad generica detras); un
    error de programacion real se propaga. Ver
    ``test_a_programming_error_propagates_instead_of_returning_none``.
+
+Nota sobre la ronda de revision 3
+----------------------------------
+El area ya no se cuenta del raster: se INTEGRA del perfil de grosor sobre
+el mismo tramo ``[start, end]`` que el volumen (ver docstring de
+``codex_caliper.geometry.measures``, ronda de revision 3). La forma en que
+la ronda 2 la restringia al fruto -- recortar el raster con un semiplano
+que pasaba por el punto de recorte, evaluado sobre TODO el lienzo -- borra
+fruto real en un banano curvo, porque ese plano vuelve a cortar el cuerpo
+del otro lado del cuadro.
+
+Lo relevante para este archivo es que
+``test_area_is_restricted_to_the_fruit_when_pedicel_is_present`` no podia
+detectarlo: solo exigia ``removed_fraction > 0.02``, y el bug quitaba
+DEMASIADO (-19.4%, -13.3% y -6.8% del area analitica en w=36/24/12), asi
+que cuanto peor era el bug, con mas comodidad pasaba el test. Lo reemplaza
+``test_fruit_area_matches_the_analytic_fruit_area_with_a_pedicel_present``,
+que compara contra un valor en FORMA CERRADA (``gt.area_mm2`` menos el
+medio disco que el plano de corte deja afuera, ver el comentario del test)
+con ``rel=0.03`` de DOS LADOS -- falla si el area sobra y si falta.
+Verificado contra la implementacion de la ronda 2: los tres calibres
+fallan (-13.70%, -9.18%, -4.51% contra ese valor esperado).
+
+Se agrega ademas ``test_area_and_volume_agree_about_the_fruit_segment``:
+despeja de cada magnitud (ya sin sus terminos de tapa) la longitud del
+tramo que integro y exige que las dos longitudes implicitas coincidan
+entre si y con ``arc_length_px`` del tramo recortado del eje, con
+``rel=1e-6``. Antes de esta ronda area y volumen se contradecian sobre
+donde termina el fruto (hasta 19% de diferencia en el area con el volumen
+dentro del 2%) y ningun test lo notaba. Verificado que falla tanto con el
+conteo de pixeles de la ronda 2 como con una sola de las dos magnitudes
+integrada sobre la abscisa cruda del esqueleto.
 """
 
 from __future__ import annotations
@@ -109,7 +141,7 @@ from codex_caliper.geometry.measures import (
     touches_border,
     trim_pedicel,
 )
-from codex_caliper.geometry.medial import medial_axis_path, width_profile_mm
+from codex_caliper.geometry.medial import arc_length_px, medial_axis_path, width_profile_mm
 from codex_caliper.geometry.outline import outer_curve, smoothed_arc_length_mm
 from tests.fixtures.synthetic import make_banana
 
@@ -168,29 +200,122 @@ def test_area_and_volume_match_ground_truth_within_3_percent():
 
 
 @pytest.mark.parametrize("width_mm,pedicel_width_mm", FRUIT_GEOMETRIES)
-def test_area_is_restricted_to_the_fruit_when_pedicel_is_present(width_mm, pedicel_width_mm):
-    # Ronda de revision 2, finding 2: area_mm2 debe describir el mismo
-    # tramo que codex_length_mm y volume_mm3 (el fruto), no la mascara
-    # completa -- reportar un area que incluye el tallo junto a una
-    # longitud que lo excluye no describe el mismo objeto.
+def test_fruit_area_matches_the_analytic_fruit_area_with_a_pedicel_present(width_mm, pedicel_width_mm):
+    # Ronda de revision 3: el test anterior solo pedia
+    # "removed_fraction > 0.02" -- es decir, solo que el area BAJARA. El bug
+    # que reemplaza (recortar el RASTER con un semiplano evaluado sobre todo
+    # el lienzo, que en un banano curvo vuelve a cortar el cuerpo del otro
+    # lado del cuadro) quitaba DEMASIADO: -19.4%, -13.3% y -6.8% contra la
+    # verdad analitica en estos tres calibres. Un test que solo mira "bajo"
+    # lo pasaba con mas comodidad cuanto peor era el bug. Este lo reemplaza
+    # por una comparacion de DOS LADOS contra un valor en forma cerrada.
+    #
+    # El objetivo: el fixture es una capsula, cuya area exacta es
+    # ``w*R*theta + pi*(w/2)**2`` (rectangulo barrido + dos medios discos,
+    # ver tests/fixtures/synthetic.py) -- y gt.area_mm2 describe la capsula
+    # PURA, sin el pedicelo, que es exactamente el fruto que se quiere
+    # medir. La unica diferencia conocida y cuantificable: el corte del
+    # pedicelo es un PLANO que pasa por la base del pedicelo, donde el
+    # fixture estampa igual una tapa redondeada completa del fruto (su
+    # docstring lo dice); el plano se queda con la mitad de esa tapa, asi
+    # que el fruto recortado mide un MEDIO disco menos que la capsula
+    # entera. Ese termino es tambien forma cerrada, no una tolerancia:
+    # expected = gt.area_mm2 - 0.5*pi*(w/2)**2.
     cfg = _cfg()
-    mask, _gt = make_banana(
+    mask, gt = make_banana(
         RADIUS_MM, ARC_RAD, width_mm, MM_PER_PX,
         pedicel_mm=PEDICEL_MM, pedicel_width_mm=pedicel_width_mm,
     )
-    full_mask_area_mm2 = float(np.count_nonzero(mask)) * (MM_PER_PX ** 2)
 
     m = measure_mask(mask, MM_PER_PX, cfg)
     assert m is not None
 
-    # el area del fruto es estrictamente menor que la de la mascara
-    # completa (se quito algo, no es un no-op)...
+    half_cap_mm2 = 0.5 * np.pi * (width_mm / 2.0) ** 2
+    expected_fruit_area_mm2 = gt.area_mm2 - half_cap_mm2
+    # dos lados: el area tiene que caer DENTRO del 3% por arriba Y por
+    # abajo. Medido: -0.3% (w=36), -0.5% (w=24), -1.6% (w=12).
+    assert m.area_mm2 == pytest.approx(expected_fruit_area_mm2, rel=0.03)
+
+    # y, por separado, que sigue siendo estrictamente menor que la mascara
+    # completa: el pedicelo no entra (la direccion que el test anterior
+    # verificaba, conservada).
+    full_mask_area_mm2 = float(np.count_nonzero(mask)) * (MM_PER_PX ** 2)
     assert m.area_mm2 < full_mask_area_mm2
-    # ...por una cantidad que no es ruido numerico: el pedicelo mas la
-    # porcion de la transicion que el corte tambien quita son una fraccion
-    # real del area total, no un redondeo de un par de pixeles.
-    removed_fraction = (full_mask_area_mm2 - m.area_mm2) / full_mask_area_mm2
-    assert removed_fraction > 0.02
+
+
+@pytest.mark.parametrize("pedicel_width_mm", [0.0, 9.0])
+def test_area_and_volume_agree_about_the_fruit_segment(pedicel_width_mm):
+    # Ronda de revision 3: area y volumen tienen que describir el MISMO
+    # tramo del fruto. Antes no lo hacian -- el area contaba pixeles de un
+    # raster recortado por un semiplano global (que borraba fruto real del
+    # otro lado del cuadro) y el volumen integraba localmente sobre
+    # [start, end], asi que los dos numeros se contradecian sobre donde
+    # termina el fruto: hasta 19% de diferencia en el area mientras el
+    # volumen quedaba dentro del 2%.
+    #
+    # Ahora los dos se integran del MISMO perfil sobre el MISMO tramo y la
+    # MISMA abscisa, y eso es lo que este test fija: se le quitan a cada
+    # magnitud sus terminos de tapa (medio disco / casquete hemisferico, que
+    # solo existen en un extremo SIN recortar) y se despeja de cada una la
+    # longitud del tramo que integro. Las dos longitudes implicitas tienen
+    # que coincidir entre si, y con la media de w sobre [start, end] --
+    # area/longitud = ancho medio, que es la forma que pide la revision.
+    # Si alguien volviera a calcular el area sobre otra region (el raster
+    # completo, un recorte distinto, otro tramo de indices), estas dos
+    # longitudes implicitas se separarian y el test fallaria.
+    cfg = _cfg()
+    mask, _gt = make_banana(
+        RADIUS_MM, ARC_RAD, WIDTH_MM, MM_PER_PX,
+        pedicel_mm=PEDICEL_MM if pedicel_width_mm > 0.0 else 0.0,
+        pedicel_width_mm=pedicel_width_mm,
+    )
+    axis = medial_axis_path(mask)
+    assert axis is not None
+    s_mm, w_mm = width_profile_mm(axis, MM_PER_PX)
+    start, end = trim_pedicel(s_mm, w_mm, cfg.pedicel_drop_ratio)
+    n = len(w_mm)
+
+    m = measure_mask(mask, MM_PER_PX, cfg)
+    assert m is not None
+
+    # terminos de tapa de cada extremo SIN recortar, con el radio local de
+    # ese extremo (medio disco para el area, casquete hemisferico para el
+    # volumen -- ver codex_caliper.geometry.measures).
+    cap_area_mm2 = 0.0
+    cap_volume_mm3 = 0.0
+    for index, trimmed in ((0, start > 0), (n - 1, end < n - 1)):
+        if trimmed:
+            continue
+        r = float(w_mm[index]) / 2.0
+        cap_area_mm2 += 0.5 * np.pi * r ** 2
+        cap_volume_mm3 += (2.0 / 3.0) * np.pi * r ** 3
+
+    swept_area_mm2 = m.area_mm2 - cap_area_mm2
+    swept_volume_mm3 = m.volume_mm3 - cap_volume_mm3
+
+    # media de w y del disco pi*(w/2)**2 sobre [start, end], ponderada por
+    # la misma regla trapezoidal que usa la implementacion (la abscisa se
+    # cancela al dividir, asi que no hace falta reconstruir su escala).
+    segment_s = s_mm[start : end + 1]
+    segment_w = w_mm[start : end + 1]
+    raw_span_mm = float(segment_s[-1] - segment_s[0])
+    mean_width_mm = float(np.trapezoid(segment_w, segment_s)) / raw_span_mm
+    mean_disc_mm2 = float(np.trapezoid(np.pi * (segment_w / 2.0) ** 2, segment_s)) / raw_span_mm
+
+    # longitud del tramo que cada magnitud integro, despejada de ella misma
+    implied_length_from_area_mm = swept_area_mm2 / mean_width_mm
+    implied_length_from_volume_mm = swept_volume_mm3 / mean_disc_mm2
+
+    # area / longitud == ancho medio sobre [start, end], y lo mismo para el
+    # volumen: las dos longitudes implicitas son la MISMA longitud.
+    assert implied_length_from_area_mm == pytest.approx(
+        implied_length_from_volume_mm, rel=1e-6
+    )
+    # y esa longitud es la del tramo del fruto (la longitud del camino del
+    # eje entre start y end, corregida del sesgo de escalera del esqueleto
+    # con la primitiva de Task 6), no la del eje completo ni la del raster.
+    fruit_axis_length_mm = arc_length_px(axis.path_px[start : end + 1]) * MM_PER_PX
+    assert implied_length_from_area_mm == pytest.approx(fruit_axis_length_mm, rel=1e-6)
 
 
 def test_volume_requires_the_hemisphere_cap_correction():

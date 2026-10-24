@@ -108,12 +108,42 @@ primera version contaba los pixeles de la mascara COMPLETA (incluido el
 pedicelo) mientras que ``codex_length_mm`` y ``volume_mm3`` ya se
 restringian al tramo recortado -- una inconsistencia que la ronda de
 revision 2 señalo: reportar un area que incluye el tallo junto a una
-longitud que lo excluye no describe el mismo objeto. ``_fruit_pixel_count``
-recorta la mascara con la misma logica de plano perpendicular al eje local
-que ``_restrict_outer_to_fruit`` usa para la curva exterior, pero aplicada
-directamente sobre los pixeles en vez de sobre una cadena de puntos. Las
-CUATRO magnitudes que devuelve ``measure_mask`` -- longitud, calibre, area
-y volumen -- describen el mismo tramo del fruto, nunca el pedicelo.
+longitud que lo excluye no describe el mismo objeto. Las CUATRO magnitudes
+que devuelve ``measure_mask`` -- longitud, calibre, area y volumen --
+describen el mismo tramo del fruto, nunca el pedicelo.
+
+**Ronda de revision 3 -- el area se INTEGRA del perfil, no se cuenta del
+raster.** La ronda 2 implemento esa restriccion con ``_fruit_pixel_count``:
+cortaba el RASTER con un semiplano que pasaba por el punto de recorte y se
+evaluaba sobre TODO el lienzo. En un banano curvo ese plano vuelve a cortar
+el cuerpo en otra parte y borra fruto real del lado opuesto del cuadro. La
+revision lo confirmo tomando las componentes conexas de los pixeles
+eliminados: DOS manchas grandes y separadas (~21k y ~19k px) en lados
+opuestos del cuadro, no una sola region compacta junto al pedicelo. Medido
+contra la verdad analitica del fixture, el area salia 19.4% (w=36), 13.3%
+(w=24) y 6.8% (w=12) por debajo -- mientras ``volume_mm3``, que integra
+LOCALMENTE sobre ``[start, end]``, se mantenia dentro del ~2%: area y
+volumen se contradecian sobre donde termina el fruto. Costaba ademas 20.6
+ms por llamada sobre el lienzo de referencia (478x1334) -- contra un
+presupuesto de ~11 ms por banano por cuadro -- porque construia un
+``mgrid`` y una grilla booleana de lienzo completo en cada llamada.
+
+``_fruit_pixel_count`` se elimino. El area ahora se INTEGRA del perfil de
+grosor, ``A = integral(w(s) ds)`` sobre ``[start, end]``, mas un termino de
+tapa en cada extremo NO recortado -- el analogo bidimensional exacto de los
+casquetes hemisfericos que el volumen ya tenia. Para una capsula el area
+cerrada es ``w*R*theta + pi*(w/2)**2`` (un rectangulo barrido mas dos medios
+discos), que es precisamente esta descomposicion y es como
+``tests/fixtures/synthetic.py`` calcula ``GroundTruth.area_mm2``: por eso el
+termino de tapa es MEDIO disco (``0.5*pi*r**2``) por extremo sin recortar, y
+las dos tapas juntas suman un disco completo. Esto resuelve los tres
+problemas a la vez: no mira nunca el cuadro (ninguna envolvente posible),
+integra el MISMO ``w(s)`` sobre el MISMO ``[start, end]`` que el volumen (no
+pueden discrepar), y una integral 1D sobre el perfil cuesta microsegundos.
+El precio aceptado: el area pasa a ser una cantidad DE MODELO, que hereda el
+supuesto de seccion circular que el volumen ya hacia, en vez de un conteo
+crudo de pixeles -- cuatro numeros consistentes bajo un supuesto declarado
+valen mas que un numero crudo que contradice a los otros tres.
 
 El volumen asume seccion circular, ``V = suma(pi*(w/2)**2 * ds)``, integrada
 SOLO sobre el tramo del fruto (``trim_pedicel``). El eje medial retrocede
@@ -124,6 +154,32 @@ casquete esferico mas alla de ese centro. Por eso se agrega explicitamente
 el volumen de un casquete esferico, ``(2/3)*pi*r**3`` con el radio local del
 extremo, en cada extremo que NO fue recortado (si el extremo fue recortado,
 no hay casquete fisico que agregar: el corte es un plano, no una tapa).
+
+La abscisa de integracion: el sesgo de "escalera" del esqueleto
+----------------------------------------------------------------
+``width_profile_mm`` (Task 6) devuelve ``s`` como la longitud acumulada del
+camino CRUDO del esqueleto, a proposito: cada ``s[i]`` tiene que
+corresponder al mismo indice de pixel que su ``w[i]``, y simplificar el
+camino perderia esa correspondencia punto a punto. Pero ese camino crudo
+recorre la curva en zigzag y sobreestima su longitud real -- ``medial.py``
+lo documenta y mide (+6.8% sobre el banano de referencia) y expone
+``simplify_path_px`` / ``arc_length_px`` justamente como la correccion.
+Medido aqui: la longitud cruda del tramo del fruto sobreestima la
+corregida en un factor ~1.055 de forma consistente en los tres calibres
+(factor de correccion 0.947-0.949).
+
+Integrar sobre la abscisa cruda arrastra ese mismo sesgo al resultado: el
+area del banano de referencia sin pedicelo salia +3.6% sobre la verdad
+analitica (y +4.3% en w=24) -- por encima del 3% exigido -- con todo el
+exceso explicado por el tramo barrido, no por las tapas. Por eso
+``_fruit_abscissa_mm`` reescala la abscisa del tramo del fruto al valor que
+da ``arc_length_px`` sobre ese mismo tramo del camino, y tanto el area como
+el volumen se integran sobre ESA abscisa -- la misma para las dos, que es
+lo que garantiza que no puedan discrepar. Con la correccion el area queda
+en -1.1% (w=36), -0.6% (w=24) y -1.7% (w=12) y el volumen en -2.1%, -1.2%
+y -3.3%; sin ella el volumen quedaba en +2.7%, +3.7% y +1.9%. El volumen
+cambia de signo de error respecto de la ronda 2 por esta razon y solo por
+esta: los terminos de casquete hemisferico no se tocaron.
 
 Contrato de excepciones -- ronda de revision 2
 ------------------------------------------------
@@ -150,7 +206,12 @@ import cv2
 import numpy as np
 
 from codex_caliper.config import AppConfig
-from codex_caliper.geometry.medial import MedialAxis, medial_axis_path, width_profile_mm
+from codex_caliper.geometry.medial import (
+    MedialAxis,
+    arc_length_px,
+    medial_axis_path,
+    width_profile_mm,
+)
 from codex_caliper.geometry.outline import outer_curve, smoothed_arc_length_mm
 
 # Derivada normalizada (|dw/ds| / w_max, en 1/mm) por encima de la cual un
@@ -176,14 +237,29 @@ _SMOOTH_WINDOW_MM = 2.0
 # no en su borde fisico.
 _HEMISPHERE_VOLUME_FACTOR = 2.0 / 3.0
 
+# Analogo bidimensional del casquete: el area de MEDIO disco de radio r es
+# 0.5*pi*r**2. Mismo motivo (el eje se detiene en el centro de la tapa) y
+# misma convencion que el fixture sintetico, donde las dos tapas juntas
+# suman un disco completo, ``pi*(w/2)**2`` (ver docstring del modulo).
+_HALF_DISC_AREA_FACTOR = 0.5
+
 
 @dataclasses.dataclass(frozen=True)
 class BananaMeasures:
     """Medidas finales de un banano, listas para reportar.
 
+    Las cuatro magnitudes -- ``codex_length_mm``, ``caliper_mm``,
+    ``area_mm2`` y ``volume_mm3`` -- describen SOLO el fruto: el tramo que
+    ``trim_pedicel`` deja entre el extremo floral y la base del pedicelo,
+    nunca el pedicelo mismo. ``area_mm2`` y ``volume_mm3`` se integran las
+    dos del perfil de grosor sobre ese mismo tramo, bajo el supuesto de
+    SECCION CIRCULAR (ver docstring del modulo): el area no es un conteo de
+    pixeles de la mascara.
+
     ``width_profile`` es la tupla ``(s_mm, w_mm)`` sobre el eje medial
-    COMPLETO (sin recortar) -- se llama asi, distinto de
-    ``width_profile_mm`` (la funcion de Task 6), para no chocar con ella.
+    COMPLETO (sin recortar, y con la abscisa CRUDA tal como la entrega
+    ``width_profile_mm``) -- se llama asi, distinto de ``width_profile_mm``
+    (la funcion de Task 6), para no chocar con ella.
     """
 
     codex_length_mm: float
@@ -394,72 +470,93 @@ def _restrict_outer_to_fruit(
     return full_outer[lo_bound : hi_bound + 1]
 
 
-def _fruit_pixel_count(mask: np.ndarray, axis: MedialAxis, start: int, end: int, n: int) -> int:
-    """Cuenta los pixeles de ``mask`` que pertenecen al tramo del FRUTO
-    (entre los indices ``start`` y ``end`` del eje medial), recortando con
-    un plano perpendicular al eje medial local en cada extremo que
-    ``trim_pedicel`` efectivamente recorto.
+def _fruit_abscissa_mm(
+    axis: MedialAxis, s_mm: np.ndarray, start: int, end: int, mm_per_px: float
+) -> np.ndarray:
+    """Abscisa curvilinea del tramo del fruto, en mm, corregida del sesgo de
+    "escalera" del camino crudo del esqueleto.
 
-    Misma idea de corte que ``_restrict_outer_to_fruit`` (un plano por
-    extremo recortado, orientado hacia el punto medio del tramo del
-    fruto, nunca una busqueda de "punto mas cercano" sobre un contorno
-    cerrado), pero aplicada directamente sobre la mascara raster en vez de
-    sobre una cadena de puntos de contorno -- ver docstring del modulo,
-    ronda de revision 2: el area se restringe al fruto igual que la
-    longitud y el volumen.
+    ``width_profile_mm`` (Task 6) devuelve ``s`` sobre el camino CRUDO, a
+    proposito (cada ``s[i]`` debe corresponder al mismo indice de pixel que
+    su ``w[i]``), y ese camino en zigzag sobreestima la longitud real de la
+    curva -- ``medial.py`` lo documenta y expone ``arc_length_px`` como la
+    correccion. Integrar ``w`` sobre la abscisa cruda arrastraria ese sesgo
+    (~+5.5% medido) al area y al volumen, asi que la abscisa del tramo se
+    reescala a la longitud que ``arc_length_px`` mide sobre ESE MISMO tramo
+    del camino. Ver docstring del modulo para los numeros.
+
+    Devuelve un arreglo que arranca en 0.0. Si el tramo es degenerado (menos
+    de dos muestras, o longitud cruda/corregida no positiva) devuelve la
+    abscisa cruda trasladada a 0, sin reescalar: no hay factor que calcular.
     """
-    if start == 0 and end == n - 1:
-        return int(np.count_nonzero(mask))
-
-    mask_bool = np.asarray(mask).astype(bool)
-    height, width = mask_bool.shape
-    ys, xs = np.mgrid[0:height, 0:width]
-    keep = np.ones((height, width), dtype=bool)
-    mid = (start + end) // 2
-    reference = axis.path_px[mid]
-
-    def apply_cut(idx: int) -> None:
-        cut_point = axis.path_px[idx]
-        lo = max(0, idx - 3)
-        hi = min(n - 1, idx + 3)
-        tangent = axis.path_px[hi] - axis.path_px[lo]
-        norm = float(np.linalg.norm(tangent))
-        if norm < 1e-9:
-            return
-        tangent = tangent / norm
-        nx, ny = -tangent[1], tangent[0]
-        signed_reference = (reference[0] - cut_point[0]) * nx + (reference[1] - cut_point[1]) * ny
-        signed = (xs - cut_point[0]) * nx + (ys - cut_point[1]) * ny
-        side = signed >= 0 if signed_reference >= 0 else signed <= 0
-        keep[:] &= side
-
-    if start > 0:
-        apply_cut(start)
-    if end < n - 1:
-        apply_cut(end)
-
-    return int(np.count_nonzero(mask_bool & keep))
+    segment = np.asarray(s_mm[start : end + 1], dtype=np.float64)
+    if len(segment) < 2:
+        return segment - (segment[0] if len(segment) else 0.0)
+    shifted = segment - segment[0]
+    raw_span_mm = float(shifted[-1])
+    if raw_span_mm <= 0.0:
+        return shifted
+    corrected_span_mm = arc_length_px(axis.path_px[start : end + 1]) * mm_per_px
+    if corrected_span_mm <= 0.0:
+        return shifted
+    return shifted * (corrected_span_mm / raw_span_mm)
 
 
-def _volume_mm3(s_mm: np.ndarray, w_mm: np.ndarray, start: int, end: int) -> float:
+def _area_mm2(abscissa_mm: np.ndarray, w_mm: np.ndarray, start: int, end: int) -> float:
+    """Area del FRUTO, integrada del perfil de grosor: ``integral(w ds)``
+    sobre ``[start, end]`` mas MEDIO disco en cada extremo que NO fue
+    recortado.
+
+    Es el analogo bidimensional exacto de los casquetes hemisfericos del
+    volumen, y la misma descomposicion que la forma cerrada de una capsula
+    (``w*R*theta + pi*(w/2)**2`` = rectangulo barrido + dos medios discos),
+    que es como el fixture sintetico calcula su verdad analitica. El area
+    NO se cuenta del raster: contar pixeles obliga a recortar la mascara con
+    un plano que, en un banano curvo, vuelve a cortar el cuerpo del otro
+    lado del cuadro y borra fruto real (ver docstring del modulo, ronda de
+    revision 3).
+
+    Si un extremo fue recortado no se le agrega tapa: alli el fruto termina
+    en un plano de corte, no en una tapa redondeada.
+    """
+    segment_w = np.asarray(w_mm[start : end + 1], dtype=np.float64)
+    if len(abscissa_mm) < 2 or len(segment_w) < 2:
+        return 0.0
+    area = float(np.trapezoid(segment_w, abscissa_mm))
+
+    n = len(w_mm)
+    if start == 0:
+        r0 = float(w_mm[0]) / 2.0
+        area += _HALF_DISC_AREA_FACTOR * math.pi * r0 ** 2
+    if end == n - 1:
+        r1 = float(w_mm[-1]) / 2.0
+        area += _HALF_DISC_AREA_FACTOR * math.pi * r1 ** 2
+    return area
+
+
+def _volume_mm3(abscissa_mm: np.ndarray, w_mm: np.ndarray, start: int, end: int) -> float:
     """Volumen de seccion circular sobre el tramo ``[start, end]``, mas un
     casquete esferico en cada extremo que NO fue recortado (ver docstring
     del modulo: el eje medial se detiene en el centro de la tapa, asi que
     la integral sola subestima el volumen real de un extremo redondeado sin
-    recortar)."""
-    segment_s = s_mm[start : end + 1]
-    segment_w = w_mm[start : end + 1]
-    if len(segment_s) < 2:
+    recortar).
+
+    Integra sobre la MISMA abscisa (``_fruit_abscissa_mm``) y el MISMO tramo
+    que ``_area_mm2``: area y volumen no pueden discrepar sobre donde
+    termina el fruto.
+    """
+    segment_w = np.asarray(w_mm[start : end + 1], dtype=np.float64)
+    if len(abscissa_mm) < 2 or len(segment_w) < 2:
         return 0.0
     integrand = math.pi * (segment_w / 2.0) ** 2
-    volume = float(np.trapezoid(integrand, segment_s))
+    volume = float(np.trapezoid(integrand, abscissa_mm))
 
     n = len(w_mm)
     if start == 0:
-        r0 = w_mm[0] / 2.0
+        r0 = float(w_mm[0]) / 2.0
         volume += _HEMISPHERE_VOLUME_FACTOR * math.pi * r0 ** 3
     if end == n - 1:
-        r1 = w_mm[-1] / 2.0
+        r1 = float(w_mm[-1]) / 2.0
         volume += _HEMISPHERE_VOLUME_FACTOR * math.pi * r1 ** 3
     return volume
 
@@ -471,11 +568,18 @@ def measure_mask(mask: np.ndarray, mm_per_px: float, cfg: AppConfig) -> BananaMe
     -> ``trim_pedicel`` -> ``outer_curve`` (con las puntas ORIGINALES, robusta)
     recortada a los indices del fruto via ``_restrict_outer_to_fruit`` ->
     ``smoothed_arc_length_mm``. Calibre = 2 * radio en el punto medio del
-    eje YA recortado. Area = pixeles del tramo del fruto (``_fruit_pixel_count``)
-    * mm_per_px**2. Volumen = suma de discos circulares sobre el tramo del
-    fruto (mas los casquetes de los extremos sin recortar, ver
-    ``_volume_mm3``). Las cuatro magnitudes describen el mismo tramo del
-    fruto (ver docstring del modulo, ronda de revision 2).
+    eje YA recortado.
+
+    Las CUATRO magnitudes devueltas describen el mismo tramo del FRUTO,
+    nunca el pedicelo. Area y volumen se calculan los dos integrando el
+    perfil de grosor sobre el MISMO tramo ``[start, end]`` y la MISMA
+    abscisa corregida (``_fruit_abscissa_mm``), bajo el supuesto de SECCION
+    CIRCULAR: ``A = integral(w ds)`` mas medio disco por extremo sin
+    recortar (``_area_mm2``) y ``V = integral(pi*(w/2)**2 ds)`` mas un
+    casquete hemisferico por extremo sin recortar (``_volume_mm3``). El area
+    es por lo tanto una cantidad DE MODELO, no un conteo crudo de pixeles
+    (ver docstring del modulo, ronda de revision 3, para por que contar
+    pixeles recortados por un plano borraba fruto real en un banano curvo).
 
     Devuelve ``None`` por una mascara GEOMETRICAMENTE degenerada -- cada
     caso esta chequeado explicitamente abajo, ANTES del paso que lo usa, no
@@ -513,9 +617,9 @@ def measure_mask(mask: np.ndarray, mm_per_px: float, cfg: AppConfig) -> BananaMe
     mid = (start + end) // 2
     caliper_mm = 2.0 * float(axis.radius_px[mid]) * mm_per_px
 
-    area_mm2 = float(_fruit_pixel_count(mask, axis, start, end, len(w_mm))) * (mm_per_px ** 2)
-
-    volume_mm3 = _volume_mm3(s_mm, w_mm, start, end)
+    abscissa_mm = _fruit_abscissa_mm(axis, s_mm, start, end, mm_per_px)
+    area_mm2 = _area_mm2(abscissa_mm, w_mm, start, end)
+    volume_mm3 = _volume_mm3(abscissa_mm, w_mm, start, end)
 
     return BananaMeasures(
         codex_length_mm=codex_length_mm,
