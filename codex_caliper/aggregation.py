@@ -20,11 +20,15 @@ Tres decisiones, no una sola:
    El objetivo explicito del proyecto es nunca reportar una cifra sin
    saber que tan equivocada puede estar.
 
-``locked`` exige las DOS condiciones a la vez: la ventana llena (``samples
-== window``) Y la desviacion de la longitud por debajo de ``lock_std_mm``.
-Ninguna de las dos basta por si sola -- una ventana llena puede seguir
-siendo ruidosa, y una ventana silenciosa pero a medio llenar todavia puede
-cambiar mucho con la siguiente muestra.
+``locked`` exige TRES condiciones a la vez: la ventana llena (``samples ==
+window``), la desviacion de la longitud por debajo de ``lock_std_mm`` Y la
+desviacion del calibre por debajo del mismo umbral. No basta con que la
+longitud se haya asentado: el veredicto CODEX depende de DOS umbrales
+(longitud >= 140 mm Y calibre >= 27 mm), y un calibre todavia ruidoso puede
+hacer que ese veredicto cambie de frame a frame aun con la interfaz
+mostrando "medida fija". Bloquear solo por longitud es exactamente el tipo
+de resultado plausible-pero-engañoso que este proyecto ya evito en otras
+cinco ocasiones.
 """
 
 from __future__ import annotations
@@ -111,7 +115,11 @@ class MeasurementAggregator:
 
         samples = len(buffer)
         window_full = samples == self.window
-        locked = window_full and length_std_mm < self.lock_std_mm
+        locked = (
+            window_full
+            and length_std_mm < self.lock_std_mm
+            and caliper_std_mm < self.lock_std_mm
+        )
 
         return TrackAggregate(
             track_id=track_id,

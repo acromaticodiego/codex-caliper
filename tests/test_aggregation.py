@@ -11,18 +11,32 @@ Tres ideas verificadas, no de pasada:
    verifico a mano que cambiar ``median`` por ``mean`` en la implementacion
    hace fallar este test (ver informe de la tarea).
 
-2. Que ``locked`` exige las DOS condiciones -- ventana llena Y desviacion
-   baja -- no cualquiera de las dos por separado.
+2. Que ``locked`` exige TODAS sus condiciones -- ventana llena Y
+   desviacion de la LONGITUD baja Y desviacion del CALIBRE baja -- no
+   cualquiera por separado, y no basta con que la longitud se haya
+   asentado.
    ``test_does_not_lock_until_the_window_is_full`` fija una serie SIN
-   ruido (desviacion ~0) pero con la ventana todavia sin llenar: si el
-   candado dependiera solo de la desviacion, este test fallaria.
+   ruido (desviacion ~0 en ambos campos) pero con la ventana todavia sin
+   llenar: si el candado dependiera solo de la desviacion, este test
+   fallaria.
    ``test_does_not_lock_while_the_measurement_is_still_noisy`` fija una
    ventana ya llena (40 empujones contra una ventana de 30) pero con
-   ruido por encima del umbral: si el candado dependiera solo de que la
-   ventana este llena, este test fallaria.
+   ruido en la LONGITUD por encima del umbral: si el candado dependiera
+   solo de que la ventana este llena, este test fallaria.
+   ``test_does_not_lock_when_only_length_has_settled_but_caliper_has_not``
+   cubre el caso que de verdad importa para el veredicto CODEX (que
+   depende de DOS umbrales, longitud Y calibre): la longitud esta fija
+   (desviacion 0) pero el calibre alterna entre dos valores separados por
+   16 mm (desviacion 8, muy por encima de ``lock_std_mm=1.0``). Si el
+   candado solo mirara la desviacion de la longitud -- como hacia la
+   primera version de este modulo -- este test fallaria; el veredicto
+   podria entonces cambiar de pass/fail frame a frame con la interfaz
+   mostrando "medida fija".
 
 3. Que la ventana deslizante EFECTIVAMENTE descarta la muestra mas vieja,
-   no solo que el conteo quede acotado en 30.
+   no solo que el conteo quede acotado en 30, y que esto vale tanto con
+   el ``window`` explicito como con el valor por defecto
+   (``TEMPORAL_WINDOW``).
    ``test_window_slides_and_drops_the_oldest_sample`` empuja primero 35
    valores muy distintos (5.0 mm) y luego exactamente 30 valores de
    190.0 mm: si la ventana no deslizara (p. ej. un buffer que solo
@@ -31,6 +45,9 @@ Tres ideas verificadas, no de pasada:
    reportada seria 5.0 en vez de 190.0. Afirmar solo ``samples == 30``
    (como hace el borrador original de la tarea) no distingue estos dos
    casos -- de ahi la aserción adicional sobre ``length_mm``.
+   ``test_default_window_is_30_frames`` repite la misma prueba sin pasar
+   ``window`` explicitamente, para que el valor por defecto no sea un
+   parametro que ningun test ejercita.
 """
 
 from __future__ import annotations
@@ -38,7 +55,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from codex_caliper.aggregation import MeasurementAggregator, TrackAggregate
+from codex_caliper.aggregation import TEMPORAL_WINDOW, MeasurementAggregator, TrackAggregate
 from codex_caliper.geometry.measures import BananaMeasures
 
 
@@ -110,8 +127,37 @@ def test_does_not_lock_while_the_measurement_is_still_noisy():
     assert out.locked is False
 
 
+def test_does_not_lock_when_only_length_has_settled_but_caliper_has_not():
+    # el veredicto CODEX depende de DOS umbrales (longitud y calibre): que
+    # la longitud se haya asentado no basta si el calibre sigue saltando.
+    agg = MeasurementAggregator(window=30, lock_std_mm=1.0)
+    out = None
+    for i in range(30):
+        caliper = 30.0 if i % 2 == 0 else 46.0  # desviacion 8.0, bien por encima del umbral
+        out = agg.push(1, measures(length=190.0, caliper=caliper))
+    assert out.length_std_mm < 1.0
+    assert out.caliper_std_mm >= 1.0
+    assert out.locked is False
+
+
 def test_window_slides_and_drops_the_oldest_sample():
     agg = MeasurementAggregator(window=30)
+    for _ in range(35):
+        agg.push(1, measures(length=5.0))
+    out = None
+    for _ in range(30):
+        out = agg.push(1, measures(length=190.0))
+    assert out.samples == 30
+    assert out.length_mm == pytest.approx(190.0, abs=0.1)
+
+
+def test_default_window_is_30_frames():
+    # sin pasar `window` explicitamente: el valor por defecto debe
+    # comportarse igual que `window=30` pasado a mano (mismo truco que
+    # `test_window_slides_and_drops_the_oldest_sample`, para que el
+    # default no sea un parametro que ningun test ejercita).
+    agg = MeasurementAggregator()
+    assert agg.window == TEMPORAL_WINDOW == 30
     for _ in range(35):
         agg.push(1, measures(length=5.0))
     out = None
