@@ -45,6 +45,31 @@ internamente -- nunca suma los segmentos crudos -- y Task 7 puede llamar a
 ``simplify_path_px`` directamente para construir su propia longitud en mm
 sobre el mismo camino ya simplificado, en vez de reimplementar la
 correccion.
+
+La abscisa de ``width_profile_mm`` tambien esta corregida
+--------------------------------------------------------
+``width_profile_mm`` devuelve ``s`` en milimetros, y hasta la ronda de
+revision 4 de Task 8 la devolvia CRUDA: la longitud acumulada del camino en
+zigzag, con exactamente el mismo sesgo de escalera que ``arc_length_px``
+existe para corregir. Medido (radius=220, arc=0.85, mm_per_px=0.2, sin
+pedicelo), contra una longitud central analitica de 187.00 mm:
+
+| calibre | ``s[-1]`` crudo | ``arc_length_px`` | sobreestimacion cruda |
+|---|---|---|---|
+| w=36 mm | 198.10 mm | 187.78 mm | +5.94% |
+| w=24 mm | 197.81 mm | 187.62 mm | +5.78% |
+| w=12 mm | 197.79 mm | 187.30 mm | +5.77% |
+
+El sesgo es sistematico y practicamente constante entre calibres: es
+discretizacion, no una propiedad del banano. Una abscisa en milimetros que
+mide 6% de mas esta MAL, no "cruda", y nada en la firma de la funcion lo
+advertia: cada consumidor (Task 8 lo descubrio integrando area y volumen
+sobre ella; Tasks 9 y 14 consumen el mismo perfil) tendria que redescubrir
+el mismo parche o heredar el error en silencio. Por eso la correccion vive
+aqui, aplicada UNA vez sobre la primitiva que ya es dueña de
+``arc_length_px``, y no en cada consumidor. ``s`` se acumula sobre el camino
+crudo (para no romper la correspondencia indice a indice con ``w``) y se
+reescala al total que mide ``arc_length_px``.
 """
 
 from __future__ import annotations
@@ -356,16 +381,35 @@ def arc_length_px(path_px: np.ndarray) -> float:
 def width_profile_mm(axis: MedialAxis, mm_per_px: float) -> tuple[np.ndarray, np.ndarray]:
     """Perfil de grosor ``w(s)`` en milimetros, a lo largo de ``axis``.
 
-    ``s`` es la abscisa curvilinea (longitud acumulada del camino CRUDO,
-    sin simplificar: cada valor de ``s`` debe corresponder al mismo indice
-    de pixel que su ``w``, y simplificar perderia esa correspondencia
-    punto a punto) en milimetros desde la primera punta. ``w`` es el ancho
-    local (el diametro del circulo inscripto, el doble del radio que
-    entrega la transformada de distancia) tambien en milimetros.
+    ``s`` es la abscisa curvilinea en milimetros desde la primera punta, YA
+    CORREGIDA del sesgo de "escalera" (ver docstring del modulo): se acumula
+    sobre el camino CRUDO -- cada valor de ``s`` tiene que corresponder al
+    mismo indice de pixel que su ``w``, y simplificar el camino perderia esa
+    correspondencia punto a punto -- y despues se reescala de modo que el
+    total coincida con ``arc_length_px`` del mismo camino, que es la longitud
+    real de la curva. Asi la abscisa conserva la correspondencia indice a
+    indice Y mide milimetros reales: ``s[-1]`` es la longitud del eje, no un
+    6% mas.
+
+    ``w`` es el ancho local (el diametro del circulo inscripto, el doble del
+    radio que entrega la transformada de distancia) tambien en milimetros.
+
+    El reescalado es UNIFORME a lo largo del camino: reparte la correccion
+    en proporcion a la longitud cruda acumulada, asumiendo que el zigzag esta
+    distribuido de forma pareja. Medido sobre el banano de referencia el
+    factor es muy estable entre calibres (0.943-0.947 para w=36/24/12), lo
+    que es consistente con un sesgo de discretizacion por paso y no con una
+    deformacion concentrada en un tramo.
     """
     diffs = np.diff(axis.path_px, axis=0)
     step_lengths_px = np.sqrt(np.sum(diffs ** 2, axis=1))
     s_px = np.concatenate([[0.0], np.cumsum(step_lengths_px)])
+
+    raw_total_px = float(s_px[-1]) if len(s_px) else 0.0
+    corrected_total_px = arc_length_px(axis.path_px)
+    if raw_total_px > 0.0 and corrected_total_px > 0.0:
+        s_px = s_px * (corrected_total_px / raw_total_px)
+
     s_mm = s_px * mm_per_px
     w_mm = axis.radius_px * 2.0 * mm_per_px
     return s_mm, w_mm

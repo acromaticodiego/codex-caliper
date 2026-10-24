@@ -155,31 +155,45 @@ el volumen de un casquete esferico, ``(2/3)*pi*r**3`` con el radio local del
 extremo, en cada extremo que NO fue recortado (si el extremo fue recortado,
 no hay casquete fisico que agregar: el corte es un plano, no una tapa).
 
-La abscisa de integracion: el sesgo de "escalera" del esqueleto
-----------------------------------------------------------------
-``width_profile_mm`` (Task 6) devuelve ``s`` como la longitud acumulada del
-camino CRUDO del esqueleto, a proposito: cada ``s[i]`` tiene que
-corresponder al mismo indice de pixel que su ``w[i]``, y simplificar el
-camino perderia esa correspondencia punto a punto. Pero ese camino crudo
-recorre la curva en zigzag y sobreestima su longitud real -- ``medial.py``
-lo documenta y mide (+6.8% sobre el banano de referencia) y expone
-``simplify_path_px`` / ``arc_length_px`` justamente como la correccion.
-Medido aqui: la longitud cruda del tramo del fruto sobreestima la
-corregida en un factor ~1.055 de forma consistente en los tres calibres
-(factor de correccion 0.947-0.949).
+La abscisa de integracion: corregida en Task 6, no aqui
+--------------------------------------------------------
+Las dos integrales necesitan una abscisa en milimetros REALES. El camino del
+esqueleto recorre la curva en zigzag, asi que su longitud acumulada cruda
+sobreestima la longitud verdadera -- medido +5.94% (w=36), +5.78% (w=24) y
++5.77% (w=12) contra una longitud central analitica de 187.00 mm. Integrar
+sobre esa abscisa arrastra el sesgo al resultado: el area del banano sin
+pedicelo salia +3.6% (w=36) y +4.3% (w=24) sobre la verdad analitica, por
+encima del 3% exigido, con todo el exceso en el tramo barrido y nada en las
+tapas.
 
-Integrar sobre la abscisa cruda arrastra ese mismo sesgo al resultado: el
-area del banano de referencia sin pedicelo salia +3.6% sobre la verdad
-analitica (y +4.3% en w=24) -- por encima del 3% exigido -- con todo el
-exceso explicado por el tramo barrido, no por las tapas. Por eso
-``_fruit_abscissa_mm`` reescala la abscisa del tramo del fruto al valor que
-da ``arc_length_px`` sobre ese mismo tramo del camino, y tanto el area como
-el volumen se integran sobre ESA abscisa -- la misma para las dos, que es
-lo que garantiza que no puedan discrepar. Con la correccion el area queda
-en -1.1% (w=36), -0.6% (w=24) y -1.7% (w=12) y el volumen en -2.1%, -1.2%
-y -3.3%; sin ella el volumen quedaba en +2.7%, +3.7% y +1.9%. El volumen
-cambia de signo de error respecto de la ronda 2 por esta razon y solo por
-esta: los terminos de casquete hemisferico no se tocaron.
+**Ronda de revision 4 -- la correccion se movio a ``width_profile_mm``.** La
+ronda 3 la aplicaba aqui, en un ayudante local (``_fruit_abscissa_mm``) que
+reescalaba la abscisa del tramo del fruto. Era la correccion correcta en el
+lugar equivocado: ``width_profile_mm`` promete milimetros y devolvia un 6%
+de mas sin que nada en su firma lo advirtiera, asi que cada consumidor del
+perfil (Tasks 9 y 14 lo consumen tambien) tendria que redescubrir el mismo
+parche o heredar el error en silencio. Task 6 ya es dueña de
+``arc_length_px`` y de la simplificacion Douglas-Peucker, asi que la
+correccion vive ahi ahora, aplicada una sola vez (ver docstring de
+``medial.py``). Este modulo simplemente consume ``s_mm`` tal como llega y
+recorta el tramo ``[start, end]``: las dos integrales comparten LA MISMA
+abscisa, que es lo que hace imposible que area y volumen discrepen.
+
+Rango de validez de la exactitud del 3%
+----------------------------------------
+``area_mm2`` y ``volume_mm3`` caen dentro del 3% de la verdad analitica para
+los calibres del rango del CODEX (el minimo del estandar,
+``CODEX_MIN_CALIPER_MM = 27.0`` en el plan del proyecto; el
+Cavendish comercial va de 34 a 42+ mm). Por debajo de ese rango domina el
+ruido de rasterizado SUBPIXEL del ancho, que no es un desplazamiento
+constante y por lo tanto no es corregible: medido, la transformada de
+distancia mide el semiancho medio -0.429 mm (w=36), -0.111 mm (w=24) y
+-0.208 mm (w=12), que elevado al cuadrado da -2.37%, -0.93% y -3.44% en el
+volumen. El caso w=12 queda apenas afuera del 3%, pero un banano de 12 mm de
+calibre no es un banano: esta fuera del rango de operacion del propio
+estandar. Los fixtures de 12 mm se conservan en los tests que verifican que
+el RECORTE se dispara en cualquier calibre (eso es robustez del criterio, y
+ahi corresponde), pero no se les exige una verdad analitica de volumen.
 
 Contrato de excepciones -- ronda de revision 2
 ------------------------------------------------
@@ -206,12 +220,7 @@ import cv2
 import numpy as np
 
 from codex_caliper.config import AppConfig
-from codex_caliper.geometry.medial import (
-    MedialAxis,
-    arc_length_px,
-    medial_axis_path,
-    width_profile_mm,
-)
+from codex_caliper.geometry.medial import MedialAxis, medial_axis_path, width_profile_mm
 from codex_caliper.geometry.outline import outer_curve, smoothed_arc_length_mm
 
 # Derivada normalizada (|dw/ds| / w_max, en 1/mm) por encima de la cual un
@@ -257,8 +266,9 @@ class BananaMeasures:
     pixeles de la mascara.
 
     ``width_profile`` es la tupla ``(s_mm, w_mm)`` sobre el eje medial
-    COMPLETO (sin recortar, y con la abscisa CRUDA tal como la entrega
-    ``width_profile_mm``) -- se llama asi, distinto de ``width_profile_mm``
+    COMPLETO (sin recortar), tal como la entrega ``width_profile_mm``: su
+    abscisa esta en milimetros reales, ya corregida del sesgo de escalera
+    del esqueleto en Task 6. Se llama asi, distinto de ``width_profile_mm``
     (la funcion de Task 6), para no chocar con ella.
     """
 
@@ -470,38 +480,6 @@ def _restrict_outer_to_fruit(
     return full_outer[lo_bound : hi_bound + 1]
 
 
-def _fruit_abscissa_mm(
-    axis: MedialAxis, s_mm: np.ndarray, start: int, end: int, mm_per_px: float
-) -> np.ndarray:
-    """Abscisa curvilinea del tramo del fruto, en mm, corregida del sesgo de
-    "escalera" del camino crudo del esqueleto.
-
-    ``width_profile_mm`` (Task 6) devuelve ``s`` sobre el camino CRUDO, a
-    proposito (cada ``s[i]`` debe corresponder al mismo indice de pixel que
-    su ``w[i]``), y ese camino en zigzag sobreestima la longitud real de la
-    curva -- ``medial.py`` lo documenta y expone ``arc_length_px`` como la
-    correccion. Integrar ``w`` sobre la abscisa cruda arrastraria ese sesgo
-    (~+5.5% medido) al area y al volumen, asi que la abscisa del tramo se
-    reescala a la longitud que ``arc_length_px`` mide sobre ESE MISMO tramo
-    del camino. Ver docstring del modulo para los numeros.
-
-    Devuelve un arreglo que arranca en 0.0. Si el tramo es degenerado (menos
-    de dos muestras, o longitud cruda/corregida no positiva) devuelve la
-    abscisa cruda trasladada a 0, sin reescalar: no hay factor que calcular.
-    """
-    segment = np.asarray(s_mm[start : end + 1], dtype=np.float64)
-    if len(segment) < 2:
-        return segment - (segment[0] if len(segment) else 0.0)
-    shifted = segment - segment[0]
-    raw_span_mm = float(shifted[-1])
-    if raw_span_mm <= 0.0:
-        return shifted
-    corrected_span_mm = arc_length_px(axis.path_px[start : end + 1]) * mm_per_px
-    if corrected_span_mm <= 0.0:
-        return shifted
-    return shifted * (corrected_span_mm / raw_span_mm)
-
-
 def _area_mm2(abscissa_mm: np.ndarray, w_mm: np.ndarray, start: int, end: int) -> float:
     """Area del FRUTO, integrada del perfil de grosor: ``integral(w ds)``
     sobre ``[start, end]`` mas MEDIO disco en cada extremo que NO fue
@@ -541,7 +519,8 @@ def _volume_mm3(abscissa_mm: np.ndarray, w_mm: np.ndarray, start: int, end: int)
     la integral sola subestima el volumen real de un extremo redondeado sin
     recortar).
 
-    Integra sobre la MISMA abscisa (``_fruit_abscissa_mm``) y el MISMO tramo
+    Integra sobre la MISMA abscisa (el tramo ``[start, end]`` de la que
+    devuelve ``width_profile_mm``, ya corregida en Task 6) y el MISMO tramo
     que ``_area_mm2``: area y volumen no pueden discrepar sobre donde
     termina el fruto.
     """
@@ -573,7 +552,8 @@ def measure_mask(mask: np.ndarray, mm_per_px: float, cfg: AppConfig) -> BananaMe
     Las CUATRO magnitudes devueltas describen el mismo tramo del FRUTO,
     nunca el pedicelo. Area y volumen se calculan los dos integrando el
     perfil de grosor sobre el MISMO tramo ``[start, end]`` y la MISMA
-    abscisa corregida (``_fruit_abscissa_mm``), bajo el supuesto de SECCION
+    abscisa (la de ``width_profile_mm``, corregida del sesgo de escalera en
+    Task 6 -- ver docstring del modulo), bajo el supuesto de SECCION
     CIRCULAR: ``A = integral(w ds)`` mas medio disco por extremo sin
     recortar (``_area_mm2``) y ``V = integral(pi*(w/2)**2 ds)`` mas un
     casquete hemisferico por extremo sin recortar (``_volume_mm3``). El area
@@ -617,7 +597,12 @@ def measure_mask(mask: np.ndarray, mm_per_px: float, cfg: AppConfig) -> BananaMe
     mid = (start + end) // 2
     caliper_mm = 2.0 * float(axis.radius_px[mid]) * mm_per_px
 
-    abscissa_mm = _fruit_abscissa_mm(axis, s_mm, start, end, mm_per_px)
+    # UNA sola abscisa para las dos integrales: el tramo del fruto de la
+    # abscisa que devuelve ``width_profile_mm``, ya corregida del sesgo de
+    # escalera en Task 6 (ver docstring del modulo). Area y volumen no
+    # pueden discrepar sobre donde termina el fruto porque no tienen dos
+    # abscisas entre las que discrepar.
+    abscissa_mm = np.asarray(s_mm[start : end + 1], dtype=np.float64)
     area_mm2 = _area_mm2(abscissa_mm, w_mm, start, end)
     volume_mm3 = _volume_mm3(abscissa_mm, w_mm, start, end)
 

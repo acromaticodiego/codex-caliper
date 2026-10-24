@@ -126,6 +126,27 @@ donde termina el fruto (hasta 19% de diferencia en el area con el volumen
 dentro del 2%) y ningun test lo notaba. Verificado que falla tanto con el
 conteo de pixeles de la ronda 2 como con una sola de las dos magnitudes
 integrada sobre la abscisa cruda del esqueleto.
+
+Nota sobre la ronda de revision 4
+----------------------------------
+La correccion del sesgo de escalera de la abscisa se movio de este modulo a
+``width_profile_mm`` (Task 6), donde la reciben todos los consumidores del
+perfil y no solo Task 8 -- ver ``tests/test_medial.py::
+test_width_profile_abscissa_matches_the_analytic_centerline``, que fija la
+abscisa contra la longitud central analitica dentro del 2% en w=36, 24 y 12.
+``measure_mask`` ya no reescala nada: recorta ``s_mm`` al tramo del fruto y
+pasa ESE arreglo a las dos integrales.
+
+El fixture de w=12 se conserva en los tests que verifican que el RECORTE se
+dispara en cualquier calibre (``test_trim_fires_across_fruit_sizes``,
+``test_trimming_removes_approximately_the_pedicel_length``), que es donde
+corresponde: son tests de robustez del criterio, no de exactitud metrica.
+Pero no se le exige una verdad analitica de VOLUMEN, porque un banano de 12
+mm de calibre esta fuera del rango de operacion del CODEX
+(minimo del estandar, ``CODEX_MIN_CALIPER_MM = 27.0`` en el plan del
+proyecto) y ahi domina el ruido de rasterizado
+subpixel del ancho, que no es un sesgo corregible -- ver el docstring de
+``codex_caliper.geometry.measures`` para los numeros medidos.
 """
 
 from __future__ import annotations
@@ -294,13 +315,12 @@ def test_area_and_volume_agree_about_the_fruit_segment(pedicel_width_mm):
     swept_volume_mm3 = m.volume_mm3 - cap_volume_mm3
 
     # media de w y del disco pi*(w/2)**2 sobre [start, end], ponderada por
-    # la misma regla trapezoidal que usa la implementacion (la abscisa se
-    # cancela al dividir, asi que no hace falta reconstruir su escala).
+    # la misma regla trapezoidal que usa la implementacion.
     segment_s = s_mm[start : end + 1]
     segment_w = w_mm[start : end + 1]
-    raw_span_mm = float(segment_s[-1] - segment_s[0])
-    mean_width_mm = float(np.trapezoid(segment_w, segment_s)) / raw_span_mm
-    mean_disc_mm2 = float(np.trapezoid(np.pi * (segment_w / 2.0) ** 2, segment_s)) / raw_span_mm
+    segment_span_mm = float(segment_s[-1] - segment_s[0])
+    mean_width_mm = float(np.trapezoid(segment_w, segment_s)) / segment_span_mm
+    mean_disc_mm2 = float(np.trapezoid(np.pi * (segment_w / 2.0) ** 2, segment_s)) / segment_span_mm
 
     # longitud del tramo que cada magnitud integro, despejada de ella misma
     implied_length_from_area_mm = swept_area_mm2 / mean_width_mm
@@ -311,11 +331,21 @@ def test_area_and_volume_agree_about_the_fruit_segment(pedicel_width_mm):
     assert implied_length_from_area_mm == pytest.approx(
         implied_length_from_volume_mm, rel=1e-6
     )
-    # y esa longitud es la del tramo del fruto (la longitud del camino del
-    # eje entre start y end, corregida del sesgo de escalera del esqueleto
-    # con la primitiva de Task 6), no la del eje completo ni la del raster.
+    # y esa longitud es la del tramo [start, end] de la abscisa que entrega
+    # width_profile_mm (ya corregida del sesgo de escalera en Task 6, ronda
+    # de revision 4), no la del eje completo ni la del raster.
+    assert implied_length_from_area_mm == pytest.approx(segment_span_mm, rel=1e-6)
+
+    # Y, de forma independiente del perfil: esa misma longitud es la que
+    # mide la primitiva de Task 6 sobre el tramo recortado del camino. No
+    # coincide al bit porque width_profile_mm reescala la abscisa con el
+    # factor de escalera del camino COMPLETO (una sola correccion para todos
+    # los consumidores) mientras que esto lo recalcula sobre el sub-tramo;
+    # medido, la diferencia es +0.009% (w=36 sin pedicelo y con el) y hasta
+    # 0.14% en los calibres chicos, muy por debajo de los 6% del sesgo que
+    # esta asercion vigila.
     fruit_axis_length_mm = arc_length_px(axis.path_px[start : end + 1]) * MM_PER_PX
-    assert implied_length_from_area_mm == pytest.approx(fruit_axis_length_mm, rel=1e-6)
+    assert implied_length_from_area_mm == pytest.approx(fruit_axis_length_mm, rel=0.005)
 
 
 def test_volume_requires_the_hemisphere_cap_correction():

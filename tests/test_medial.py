@@ -123,6 +123,42 @@ def test_centerline_length_matches_ground_truth_within_2_percent():
     assert length == pytest.approx(gt.centerline_length_mm, rel=0.02)
 
 
+@pytest.mark.parametrize("width_mm", [36.0, 24.0, 12.0])
+def test_width_profile_abscissa_matches_the_analytic_centerline(width_mm):
+    # Task 8, ronda de revision 4: ``s`` esta en MILIMETROS, asi que tiene
+    # que medir milimetros reales. Antes de esta ronda era la longitud
+    # acumulada del camino CRUDO del esqueleto, con el mismo sesgo de
+    # escalera que ``arc_length_px`` existe para corregir: medido +5.94%
+    # (w=36), +5.78% (w=24) y +5.77% (w=12) sobre la longitud central
+    # analitica -- sistematico y casi constante entre calibres, es
+    # discretizacion, no geometria del banano. Nada en la firma de
+    # ``width_profile_mm`` advertia de ese 6%, y Task 8 (area y volumen
+    # integrados sobre esta abscisa) mas Tasks 9 y 14 consumen el mismo
+    # perfil, asi que la correccion se aplica aqui, una sola vez.
+    #
+    # Parametrizado sobre tres calibres porque el sesgo era practicamente
+    # independiente del calibre: un test de un solo calibre no distinguiria
+    # una correccion real de una constante ajustada a ese caso.
+    mask, gt = make_banana(RADIUS_MM, ARC_RAD, width_mm, MM_PER_PX)
+    axis = medial_axis_path(mask)
+    assert axis is not None
+    s_mm, w_mm = width_profile_mm(axis, MM_PER_PX)
+
+    assert len(s_mm) == len(w_mm)  # correspondencia indice a indice intacta
+    assert s_mm[0] == 0.0
+    assert np.all(np.diff(s_mm) >= 0.0)  # monotona: sigue siendo una abscisa
+
+    # el eje medial de una capsula va de CENTRO a CENTRO de tapa, asi que su
+    # longitud es la de la curva central analitica (ver docstring del modulo
+    # de tests). Medido tras la correccion: +0.42% / +0.33% / +0.16%.
+    assert s_mm[-1] == pytest.approx(gt.centerline_length_mm, rel=0.02)
+
+    # y es la misma longitud que mide ``arc_length_px`` sobre el mismo
+    # camino: la correccion es exactamente ese reescalado, no un ajuste
+    # aparte que pudiera desviarse de la primitiva.
+    assert s_mm[-1] == pytest.approx(arc_length_px(axis.path_px) * MM_PER_PX, rel=1e-9)
+
+
 def test_width_profile_is_flat_for_a_constant_width_capsule():
     mask, _gt = make_banana(RADIUS_MM, ARC_RAD, WIDTH_MM, MM_PER_PX)
     axis = medial_axis_path(mask)
