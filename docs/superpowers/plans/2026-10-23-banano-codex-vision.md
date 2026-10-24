@@ -657,7 +657,13 @@ git commit -m "feat: pedicel trimming, caliper, area and volume"
 **Interfaces:**
 - Consumes: `BananaMeasures` (Task 8), `AppConfig` (Task 1)
 - Produces: `scale_factor(effective_height_mm: float, object_height_mm: float) -> float`
-- Produces: `correct_measures(measures, cfg, iterations: int = 2) -> BananaMeasures`
+- Produces: `correct_measures(measures, cfg) -> BananaMeasures`
+  - **Correccion del plan, medida en ejecucion.** El plan original pedia iterar dos veces
+    "hasta converger". El esquema OSCILA hacia el punto fijo y dos pasadas se pasan
+    **0.082 mm** del limite (iter 2 = 266.993, iter 3 = 266.905, iter 6 = 266.911). Pero el
+    punto fijo es lineal y exacto: de `h = c*(H - h/2)/H` sale `factor = 2*H_ef / (2*H_ef + c)`,
+    que coincide con el limite hasta el ultimo digito. No hay nada que converger, asi que el
+    parametro `iterations` desaparece en vez de subir a 6.
 
 - [ ] **Step 1: Escribir los tests que fallan**
 
@@ -674,10 +680,14 @@ def test_uncorrected_banana_is_overestimated_by_about_six_percent():
     corrected = correct_measures(raw, cfg)
     assert raw.codex_length_mm / corrected.codex_length_mm == pytest.approx(1.065, rel=0.02)
 
-def test_two_iterations_converge():
-    a = correct_measures(raw, cfg, iterations=2)
-    b = correct_measures(raw, cfg, iterations=6)
-    assert a.codex_length_mm == pytest.approx(b.codex_length_mm, abs=0.05)
+def test_closed_form_factor_is_the_fixed_point():
+    # sustituye al antiguo test de convergencia: propiedad mas fuerte, prueba que la
+    # forma cerrada ES el punto fijo, no solo que algo deja de moverse
+    assert closed_form == pytest.approx(iterative_limit, rel=1e-15)
+
+# OJO: `test_uncorrected_banana_is_overestimated_by_about_six_percent` NO discrimina.
+# Medido: un factor ingenuo de una sola pasada da 1.0723, que cae dentro de rel=0.02
+# de 1.065 y pasa igual. Hace falta ademas un pin exacto del factor (534/570).
 
 def test_volume_scales_with_the_cube_of_the_factor():
     # longitud y ancho escalan con el factor; el volumen va al cubo
