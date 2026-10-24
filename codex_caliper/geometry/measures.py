@@ -17,21 +17,43 @@ su valor absoluto: un umbral absoluto de ancho recortaria ambos extremos por
 igual y acortaria el fruto por el lado floral.
 
 Calibrado contra el banano sintetico de referencia (radius=220, arc=0.85,
-width=36, mm_per_px=0.2, ver ``tests/test_measures.py``):
+width=36, mm_per_px=0.2, ver ``tests/test_measures.py``). Los numeros de
+abajo son POSTERIORES a la correccion de la abscisa de la ronda de revision
+4 (ver mas abajo): la abscisa se acorto un 5.5%, asi que toda derivada
+``dw/ds`` crecio en la misma proporcion y la calibracion previa ya no
+describia el codigo. Medidos sobre el perfil SUAVIZADO (``_smooth`` con
+``_SMOOTH_WINDOW_MM``), con la derivada normalizada ``|dw/ds| / w_max`` en
+1/mm, sobre una sola mascara que lleva los dos extremos a la vez
+(``pedicel_mm=25``, ``pedicel_width_mm=9``, ``blossom_taper_mm=30``), cada
+extremo medido sobre su propio tramo "delgado -> meseta":
 
-- El ruido de fondo del perfil (cuerpo del banano, lejos de cualquier
-  extremo) tiene una derivada normalizada (``|dw/ds| / w_max``) de hasta
-  ~0.016 1/mm.
-- Un adelgazamiento floral deliberadamente GRADUAL (``blossom_taper_mm=30``)
-  sostiene una derivada normalizada de ~0.027-0.031 1/mm durante toda la
-  caida.
-- La transicion al pedicelo (``pedicel_mm=25``, ``pedicel_width_mm=9``,
-  sobre un fruto de 36 mm de calibre) sostiene ~0.04-0.055 1/mm durante
-  decenas de muestras consecutivas.
+- Ruido de fondo del perfil (cuerpo del banano, entre el 20% y el 80% de
+  ``s``, lejos de los dos extremos): hasta ~0.0115 1/mm puntual.
+- Adelgazamiento floral deliberadamente GRADUAL
+  (``blossom_taper_mm=30``): banda puntual ~0.026-0.036 1/mm (maximo
+  0.0404), y lo que el criterio realmente compara -- la pendiente PROMEDIO
+  del tramo -- **0.0307 1/mm**, por DEBAJO del umbral: no se corta.
+- Transicion al pedicelo (``pedicel_mm=25``, ``pedicel_width_mm=9``, sobre
+  un fruto de 36 mm de calibre): banda puntual ~0.051-0.059 1/mm (maximo
+  0.0604) sostenida sobre decenas de muestras, y pendiente promedio del
+  tramo **0.0508 1/mm**, por ENCIMA del umbral: se corta.
 
-El umbral ``_DERIVATIVE_THRESHOLD_PER_MM = 0.04`` cae comodo entre el
-adelgazamiento gradual (0.03) y la transicion abrupta (0.04-0.055), con
-margen de sobra sobre el ruido de fondo (0.016). El perfil crudo tiene
+El umbral ``_DERIVATIVE_THRESHOLD_PER_MM = 0.04`` sigue cayendo entre los
+dos casos, con 0.0093 1/mm de margen del lado gradual (0.0307) y 0.0108 del
+lado abrupto (0.0508), y mas de tres veces el ruido de fondo (0.0115).
+
+**Como movio la correccion de la abscisa estos margenes** (misma medicion,
+antes y despues del cambio de la ronda 4, para quien vuelva a tocar el
+umbral): la pendiente promedio del adelgazamiento gradual subio de 0.0291 a
+0.0307, asi que el margen de ESE lado -- el que decide que el extremo floral
+NO se recorte -- se angosto de 0.0109 a 0.0093 1/mm; la del pedicelo subio
+de 0.0481 a 0.0508, asi que el margen del lado abrupto se ENSANCHO de 0.0081
+a 0.0108. El umbral no se retoco: ambos casos siguen bracketeados con todos
+los tests pasando, y mover una constante calibrada para comprar 0.0016 1/mm
+de un lado a costa del otro no se justifica. Quien lo revise: el lado
+gradual es ahora el ajustado de los dos, al reves que antes.
+
+El perfil crudo tiene
 ademas un artefacto puntual en la ultima muestra de una punta afilada (el
 refinamiento de punta de ``medial.py`` asume una tapa convexa redondeada,
 no un cono, y se desvia un poco justo en el ultimo punto): por eso la
