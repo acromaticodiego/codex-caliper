@@ -525,7 +525,23 @@ def test_outer_curve_is_the_longer_of_the_two_chains():
     assert len(outer) == max(len(a), len(b))
 
 def test_codex_length_matches_outer_curve_ground_truth_within_2_percent():
-    mask, gt = make_banana(220.0, 0.85, 36.0, 0.2)
+    # OJO -- defecto corregido del plan original, medido en ejecucion.
+    # El fixture literal (220.0, 0.85, 36.0, 0.2) NO puede pasar esta asercion,
+    # por dos razones acumuladas:
+    #   1. `GroundTruth.outer_length_mm` es el riel puro (R+w/2)*theta = 202.30 mm
+    #      y EXCLUYE las tapas; la cadena medida entre las dos puntas incluye
+    #      necesariamente material de tapa. Con w=36 cada tapa mide pi*w/2 =
+    #      56.55 mm, un 28% del riel. Medido: +40.83% de error.
+    #   2. La punta del eje medial de una capsula esta en el CENTRO de la tapa,
+    #      a w/2 del borde, no sobre el. Todo el semicirculo equidista, asi que
+    #      el punto de corte lo decide el ruido de rasterizado: medido, 85 y 97
+    #      puntos del contorno empatados a menos de 1 px.
+    # El plan confundio "extremo del eje medial" con "punta sobre el borde".
+    # En un banano real casi coinciden porque la punta es afilada y el radio
+    # local tiende a cero; en una capsula de tapa redonda distan 18 mm.
+    # Fixture correcto: extremos afilados, de modo que la tapa sea despreciable
+    # frente al riel. Documentar el porque en el modulo de test.
+    mask, gt = make_banana(220.0, 0.85, 4.0, 0.2, blossom_taper_mm=3.5)
     got = smoothed_arc_length_mm(outer_curve(contour_of(mask), tips), 0.2)
     assert got == pytest.approx(gt.outer_length_mm, rel=0.02)
 
@@ -641,7 +657,13 @@ git commit -m "feat: pedicel trimming, caliper, area and volume"
 **Interfaces:**
 - Consumes: `BananaMeasures` (Task 8), `AppConfig` (Task 1)
 - Produces: `scale_factor(effective_height_mm: float, object_height_mm: float) -> float`
-- Produces: `correct_measures(measures, cfg, iterations: int = 2) -> BananaMeasures`
+- Produces: `correct_measures(measures, cfg) -> BananaMeasures`
+  - **Correccion del plan, medida en ejecucion.** El plan original pedia iterar dos veces
+    "hasta converger". El esquema OSCILA hacia el punto fijo y dos pasadas se pasan
+    **0.082 mm** del limite (iter 2 = 266.993, iter 3 = 266.905, iter 6 = 266.911). Pero el
+    punto fijo es lineal y exacto: de `h = c*(H - h/2)/H` sale `factor = 2*H_ef / (2*H_ef + c)`,
+    que coincide con el limite hasta el ultimo digito. No hay nada que converger, asi que el
+    parametro `iterations` desaparece en vez de subir a 6.
 
 - [ ] **Step 1: Escribir los tests que fallan**
 
@@ -658,10 +680,14 @@ def test_uncorrected_banana_is_overestimated_by_about_six_percent():
     corrected = correct_measures(raw, cfg)
     assert raw.codex_length_mm / corrected.codex_length_mm == pytest.approx(1.065, rel=0.02)
 
-def test_two_iterations_converge():
-    a = correct_measures(raw, cfg, iterations=2)
-    b = correct_measures(raw, cfg, iterations=6)
-    assert a.codex_length_mm == pytest.approx(b.codex_length_mm, abs=0.05)
+def test_closed_form_factor_is_the_fixed_point():
+    # sustituye al antiguo test de convergencia: propiedad mas fuerte, prueba que la
+    # forma cerrada ES el punto fijo, no solo que algo deja de moverse
+    assert closed_form == pytest.approx(iterative_limit, rel=1e-15)
+
+# OJO: `test_uncorrected_banana_is_overestimated_by_about_six_percent` NO discrimina.
+# Medido: un factor ingenuo de una sola pasada da 1.0723, que cae dentro de rel=0.02
+# de 1.065 y pasa igual. Hace falta ademas un pin exacto del factor (534/570).
 
 def test_volume_scales_with_the_cube_of_the_factor():
     # longitud y ancho escalan con el factor; el volumen va al cubo

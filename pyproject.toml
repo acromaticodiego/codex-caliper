@@ -9,7 +9,7 @@ description = "Codex-compliant banana dimensional measurement from a single came
 requires-python = ">=3.10"
 dependencies = [
     "opencv-python",
-    "numpy",
+    "numpy>=2.0",
     "scipy",
     "scikit-image",
     "ultralytics",
