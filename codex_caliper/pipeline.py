@@ -254,7 +254,28 @@ class Pipeline:
         instances = self._reassigner.assign(
             self.detector.detect(rectified), self._previous_instances
         )
-        self._previous_instances = instances
+        # Solo se refresca la memoria de centroides si este cuadro produjo
+        # ALGUNA instancia. Un cuadro sin detecciones (fruta tapada un
+        # instante, una oclusion) no es evidencia de que la fruta se fue --
+        # es exactamente el hueco que ``CentroidReassigner`` existe para
+        # puentear (spec S7 etapa 4). Sobrescribir con la lista vacia
+        # tiraria esa memoria justo en el hueco que debia cubrir: el
+        # siguiente cuadro bueno no tendria nada contra que reasociarse y
+        # YOLO le asignaria ids nuevos, lo que en la practica reinicia el
+        # acumulador temporal (Ruling 7) por un mecanismo distinto al que
+        # esa regla nombra explicitamente (``forget()``), pero con el mismo
+        # efecto observable que prohibe.
+        #
+        # Los otros dos caminos que retornan temprano no necesitan el mismo
+        # cuidado, por razones distintas: un cuadro ``BLOCKED`` retorna
+        # ANTES de llegar aqui, asi que nunca pisa la memoria (la deja tal
+        # cual la dejo el ultimo cuadro medible). Un cuadro con fruta
+        # adyacente SI llega aqui con ``instances`` no vacio -- hay
+        # detecciones, solo que demasiado juntas para medir por separado --
+        # asi que la condicion de abajo ya las conserva igual que a
+        # cualquier otro cuadro medible.
+        if instances:
+            self._previous_instances = instances
 
         adjacent_pair = _first_adjacent_pair(instances)
         if adjacent_pair is not None:

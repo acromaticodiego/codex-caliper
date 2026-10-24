@@ -38,6 +38,7 @@ from codex_caliper.aruco_tools import CalibrationState, detect_markers
 from codex_caliper.codex import CODEX_MIN_CALIPER_MM, CODEX_MIN_LENGTH_MM
 from codex_caliper.config import AppConfig
 from codex_caliper.detection import BananaDetector, YOLO_BANANA_CLASS_ID
+from codex_caliper.geometry.measures import measure_mask
 from codex_caliper.homography import DegenerateMarkerLayout, canvas_size_for
 from codex_caliper.intrinsics import Intrinsics
 from codex_caliper.pipeline import (
@@ -45,6 +46,7 @@ from codex_caliper.pipeline import (
     CLOSING_BRIDGE_PX,
     Pipeline,
 )
+from codex_caliper.segmentation import refine_mask
 from tests.fixtures.synthetic import make_banana, make_banana_scene
 
 _MM_PER_PX = 0.2
@@ -162,7 +164,21 @@ class _FakeYoloModel:
 
     Devuelve ``boxes``/``masks`` en ``None`` cuando no hay nada, igual que
     ultralytics en un cuadro vacio.
+
+    ``id_offset`` (mutable, default 0) se suma a cada id crudo. Por defecto
+    los ids salen deterministas y estables, derivados del orden de barrido
+    de ``connectedComponents`` sobre una escena quieta -- pero eso es
+    precisamente lo que una prueba sobre perdida de identidad NO debe dejar
+    fijo: un tracker real (ByteTrack) no promete el mismo id crudo despues
+    de una oclusion, y una prueba cuyo doble si lo promete pasaria igual con
+    un pipeline que tira la memoria de centroides en el cuadro vacio (los
+    ids crudos coincidirian con los de antes por construccion del doble, no
+    porque ``CentroidReassigner`` los haya recuperado). Subir ``id_offset``
+    entre llamadas simula esa reidentificacion con ids nuevos.
     """
+
+    def __init__(self, id_offset: int = 0) -> None:
+        self.id_offset = id_offset
 
     def track(self, frame, persist=True, classes=None):
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -178,10 +194,11 @@ class _FakeYoloModel:
             masks.append(component.astype(np.float32))
             boxes.append([float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())])
             # Los labels de ``connectedComponents`` salen en orden de barrido
-            # (arriba-izquierda primero), asi que los ids son deterministas y
-            # estables entre cuadros sobre una escena quieta -- que es lo que
-            # hace un tracker real sobre el rig.
-            ids.append(len(ids) + 1)
+            # (arriba-izquierda primero), asi que SIN ``id_offset`` los ids
+            # son deterministas y estables entre cuadros sobre una escena
+            # quieta -- ver la nota de ``id_offset`` arriba sobre por que
+            # eso no basta para probar perdida de identidad.
+            ids.append(len(ids) + 1 + self.id_offset)
 
         if not masks:
             return [_FakeResult(None, None)]
@@ -340,6 +357,18 @@ def sharp_truth():
 
 
 @pytest.fixture(scope="module")
+def sharp_mask() -> np.ndarray:
+    """La mascara PRISTINA de ``_SHARP_BANANA``: sin escena, sin marcadores,
+    sin rectificacion ni ``refine_mask`` -- la unica entrada que aisla el
+    sesgo de ``measure_mask`` (fixture de Task 7 + recorte de pedicelo de
+    Task 8) del sesgo que aporta la cadena ArUco/homografia/deteccion. Ver
+    ``test_end_to_end_error_decomposes_into_pristine_and_warp_chain_bias``.
+    """
+    mask, _gt = make_banana(mm_per_px=_MM_PER_PX, **_SHARP_BANANA)
+    return mask
+
+
+@pytest.fixture(scope="module")
 def sharp_cfg() -> AppConfig:
     return _config_for(_SHARP_LAYOUT)
 
@@ -449,6 +478,66 @@ def test_end_to_end_without_parallax_correction_recovers_outer_length_ground_tru
     assert result.mask.dtype == bool
     assert result.mask.shape == r.rectified.shape[:2]
     assert np.count_nonzero(result.mask) > 0
+
+
+def test_end_to_end_error_decomposes_into_pristine_and_warp_chain_bias(
+    sharp_scene, sharp_mask, sharp_truth, sharp_cfg
+):
+    """El +0.32% de la prueba de arriba NO es la exactitud del sistema: son
+    DOS sesgos de signo opuesto anulandose, y sin esta prueba esa
+    cancelacion queda escondida dentro de un solo numero.
+
+    Mecanismo (encontrado en revision, verificar antes de volver a
+    derivarlo): ``trim_pedicel`` (Task 8) recorta ~13 mm del afinamiento
+    floral de ``_SHARP_BANANA`` AUNQUE ``pedicel_mm=0.0`` -- con
+    ``blossom_taper_mm=11.9`` sobre ``width_mm=12`` la caida de ancho es
+    abrupta en relacion al cuerpo, y el criterio de derivada normalizada de
+    ``trim_pedicel`` la dispara igual. Ese recorte cancela casi todo el
+    sesgo conocido del fixture de Task 7 (+15..23% en ``w`` grande, mucho
+    menor aqui por ser ``w=12``): ``measure_mask`` sobre la mascara
+    PRISTINA (sin escena, sin marcadores, sin rectificacion, sin
+    ``refine_mask``) mide apenas **-0.04%**, muy por debajo del ~1.4% que
+    el presupuesto de la tarea asumia para ese termino solo. El pipeline
+    COMPLETO le suma encima el sesgo de la cadena ArUco -> homografia ->
+    rectificacion -> deteccion -> ``refine_mask``, y el resultado neto
+    (+0.32%) sigue siendo pequeño -- pero por composicion de dos terminos
+    pequeños de signo distinto, no porque cada eslabon sea exacto por si
+    solo.
+
+    Por que esto necesita DOS aserciones, no una: pinear solo el +0.32%
+    total deja ciego a un cambio que empeorara la cadena de warp un 1.4%
+    mientras el recorte de pedicelo se volviera 1.4% MENOS agresivo (o
+    viceversa) -- las dos prueba de arriba seguiria sin moverse, porque los
+    dos terminos se compensarian de nuevo, por una coincidencia distinta de
+    parametros. Pineando el termino PRISTINO por separado (que no pasa por
+    la cadena de warp en absoluto), un cambio en la agresividad del recorte
+    se ve aqui sin importar que haga la cadena de warp; pineando el
+    COMPLETO por separado con un margen mas angosto que ``rel=0.03``, un
+    cambio en la cadena de warp se ve sin importar que haga el recorte.
+
+    No tratar el +0.32% como la precision del sistema en ningun reporte:
+    el objetivo honesto declarado es +-1 mm, con el recorte de pedicelo
+    dominando a +-3 mm sobre fruta con cabo real (spec S7.b, HANDOFF). Este
+    numero es una coincidencia de los parametros de ESTE fixture sintetico.
+    """
+    pristine = measure_mask(sharp_mask, _MM_PER_PX, sharp_cfg)
+    assert pristine is not None
+    # Termino PRISTINO: fixture de Task 7 + recorte de pedicelo de Task 8,
+    # sin ningun eslabon de la cadena de adquisicion. ~1 mm de margen
+    # (~0.11% de 904 mm) alcanza para el -0.33 mm medido y para romperse si
+    # el recorte se volviera tan agresivo -- o tan laxo -- como predecia el
+    # presupuesto original (~1.4%, ~12.7 mm).
+    assert pristine.codex_length_mm == pytest.approx(sharp_truth.outer_length_mm, abs=1.0)
+
+    pipeline, _detector = _build(sharp_scene, sharp_cfg, correct_parallax=False)
+    full = pipeline.process(sharp_scene).results[0].aggregate
+    # Termino COMPLETO: le suma a lo de arriba la cadena ArUco/homografia/
+    # rectificacion/deteccion/``refine_mask``. 4 mm (~0.44%) es mas angosto
+    # que el ``rel=0.03`` (~27 mm) de la prueba de arriba a proposito: ese
+    # margen amplio existe para la interfaz publicada, no para esta prueba,
+    # que quiere notar un movimiento de la cadena de warp que el margen
+    # amplio absorberia sin pestañear.
+    assert full.length_mm == pytest.approx(sharp_truth.outer_length_mm, abs=4.0)
 
 
 # ---------------------------------------------------------------------------
@@ -607,15 +696,80 @@ def test_a_degenerate_marker_layout_propagates_instead_of_becoming_a_warning():
 # ---------------------------------------------------------------------------
 
 
+def _two_square_blobs_bgr(gap_px: int, blob_size_px: int = 40) -> tuple[np.ndarray, np.ndarray]:
+    """Lienzo BGR con dos manchas SATURADAS cuadradas, cara a cara, separadas
+    exactamente ``gap_px`` pixeles, mas una mascara gruesa que cubre a las
+    dos (para que ``refine_mask`` no las recorte por su propio bbox).
+
+    Fondo blanco (``saturacion 0``), manchas amarillo puro ``(0, 255, 255)``
+    en BGR (``saturacion 255`` en HSV) -- la misma separacion de canal que usa
+    el resto del modulo para distinguir fruta de fondo.
+    """
+    height = blob_size_px + 40
+    width = 2 * blob_size_px + gap_px + 40
+    canvas = np.full((height, width, 3), 255, dtype=np.uint8)
+    y0 = 20
+    x0_left = 20
+    x0_right = x0_left + blob_size_px + gap_px
+    canvas[y0 : y0 + blob_size_px, x0_left : x0_left + blob_size_px] = (0, 255, 255)
+    canvas[y0 : y0 + blob_size_px, x0_right : x0_right + blob_size_px] = (0, 255, 255)
+
+    coarse_mask = np.zeros((height, width), dtype=bool)
+    coarse_mask[y0 : y0 + blob_size_px, x0_left : x0_right + blob_size_px] = True
+    return canvas, coarse_mask
+
+
+def test_closing_bridge_px_matches_refine_masks_actual_bridging_distance():
+    """``CLOSING_BRIDGE_PX`` tiene que seguir siendo la distancia de puenteo
+    REAL de ``refine_mask``, no una constante copiada de un script aparte.
+
+    La prueba anterior (``test_the_adjacency_threshold_exceeds_...`` abajo)
+    solo compara ``ADJACENCY_DILATE_PX > CLOSING_BRIDGE_PX`` -- dos
+    constantes de este modulo entre si. Eso queda en VERDE aunque las dos
+    deriven mal, o aunque alguien cambie ``_CLOSE_KERNEL_PX`` en
+    ``segmentation.py`` sin tocar esta constante: nada ejercita el
+    ``refine_mask`` real. Esta prueba si lo hace.
+
+    A un hueco de EXACTAMENTE ``CLOSING_BRIDGE_PX`` pixeles, el cierre
+    puentea las dos manchas y ``refine_mask`` (que se queda con el
+    componente conexo MAS GRANDE) debe devolver las DOS fusionadas en una
+    sola mascara -- su area tiene que acercarse a la SUMA de las dos. A
+    ``CLOSING_BRIDGE_PX + 1`` (ya no puenteable segun la constante),
+    ``refine_mask`` debe quedarse con UNA sola -- su area tiene que
+    acercarse a la MITAD. Si ``CLOSING_BRIDGE_PX`` estuviera mal (por
+    ejemplo, un ``_CLOSE_KERNEL_PX`` distinto en produccion), uno de los dos
+    huecos no haria lo que su nombre promete y la comparacion de abajo
+    fallaria.
+    """
+    bridged_bgr, bridged_coarse = _two_square_blobs_bgr(CLOSING_BRIDGE_PX)
+    separated_bgr, separated_coarse = _two_square_blobs_bgr(CLOSING_BRIDGE_PX + 1)
+
+    bridged = refine_mask(bridged_bgr, bridged_coarse)
+    separated = refine_mask(separated_bgr, separated_coarse)
+
+    assert bridged is not None
+    assert separated is not None
+
+    bridged_px = int(np.count_nonzero(bridged))
+    separated_px = int(np.count_nonzero(separated))
+
+    # Fusionadas (gap == CLOSING_BRIDGE_PX): el area cubre las DOS manchas.
+    # Separadas (gap == CLOSING_BRIDGE_PX + 1): el area cubre solo UNA.
+    # El factor 1.5 deja margen de sobra entre "el doble" y "la mitad" sin
+    # acercarse a ninguno de los dos, asi que no puede pasar por casualidad.
+    assert bridged_px > separated_px * 1.5
+
+
 def test_the_adjacency_threshold_exceeds_the_measured_closing_bridge():
     """El umbral de adyacencia se DERIVA, no se adivina.
 
     ``refine_mask`` cierra con un kernel de 9x9 px que puentea un hueco de
-    hasta ``CLOSING_BRIDGE_PX`` (8 px = 1.6 mm, medido). Por debajo de eso la
-    segmentacion fusiona dos frutos y "el componente conexo mas grande"
-    devuelve una quimera. El umbral tiene que ser ESTRICTAMENTE mayor, o
-    existe una banda de separaciones en la que el pipeline mide una quimera
-    sin avisar.
+    hasta ``CLOSING_BRIDGE_PX`` (8 px = 1.6 mm, medido -- ver la prueba de
+    arriba, que ejercita ``refine_mask`` de verdad en vez de comparar solo
+    estas dos constantes entre si). Por debajo de eso la segmentacion
+    fusiona dos frutos y "el componente conexo mas grande" devuelve una
+    quimera. El umbral tiene que ser ESTRICTAMENTE mayor, o existe una
+    banda de separaciones en la que el pipeline mide una quimera sin aviso.
     """
     assert ADJACENCY_DILATE_PX > CLOSING_BRIDGE_PX
 
@@ -776,22 +930,48 @@ def test_the_aggregator_is_not_reset_by_a_frame_without_detections(plump_scene, 
     un ``track_id`` NO reinicie el acumulador.
 
     Tres cuadros buenos, uno perdido (misma escena, fruta borrada: la
-    calibracion sigue intacta), y un cuarto cuadro bueno. Si el cuadro
+    calibracion sigue intacta), y un cuarto cuadro bueno con ids CRUDOS
+    nuevos (``model.id_offset``, ver el doble de YOLO). Si el cuadro
     perdido reiniciara los buffers, el ultimo agregado volveria a
-    ``samples == 1``.
+    ``samples == 1`` -- y si el pipeline tirara su memoria de centroides en
+    ese cuadro vacio, los ids crudos nuevos no tendrian contra que
+    reasociarse y saldrian como ``track_id`` tal cual, distintos de los de
+    antes del hueco.
+
+    La version anterior de esta prueba NO distinguia eso: el doble de YOLO
+    deriva sus ids del orden de barrido de ``connectedComponents`` sobre
+    una escena quieta, asi que sin ``id_offset`` los ids crudos salen
+    identicos en todos los cuadros por construccion, pasen por
+    ``CentroidReassigner`` o no. Un pipeline que pisara
+    ``self._previous_instances`` con la lista vacia del cuadro perdido
+    pasaba esta prueba igual, porque los ids crudos del cuadro siguiente
+    coincidian con los track_id anteriores por casualidad del doble, no
+    porque la reasociacion los hubiera recuperado. Subir ``id_offset``
+    despues del hueco fuerza ids crudos DISTINTOS, asi que la unica forma
+    de recuperar la identidad es que la memoria de centroides sobreviva al
+    cuadro vacio.
     """
-    pipeline, _ = _build(plump_scene, plump_cfg)
+    pipeline, detector = _build(plump_scene, plump_cfg)
+    model = detector.inner.model
 
     for expected_samples in (1, 2, 3):
         r = pipeline.process(plump_scene)
         assert [result.aggregate.samples for result in r.results] == [expected_samples] * 2
+    track_ids_before_gap = sorted(result.track_id for result in r.results)
 
     dropped = pipeline.process(_hide_fruit(plump_scene))
     assert dropped.results == []
     assert dropped.plane is not None
 
+    model.id_offset += 1000
     r = pipeline.process(plump_scene)
     assert [result.aggregate.samples for result in r.results] == [4, 4]
+    # Los ids CRUDOS que entrego YOLO para este cuadro son nuevos
+    # (desplazados por ``id_offset``); que el pipeline haya conservado el
+    # MISMO ``track_id`` que antes del hueco solo puede venir de
+    # ``CentroidReassigner`` reasociando por cercania de centroide, no de
+    # una coincidencia de ids crudos.
+    assert sorted(result.track_id for result in r.results) == track_ids_before_gap
 
 
 def test_the_aggregate_window_follows_the_configured_temporal_window(plump_cfg):
