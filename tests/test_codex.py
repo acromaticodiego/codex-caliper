@@ -31,3 +31,15 @@ def test_commercial_grade_is_the_truncated_caliper_in_mm():
 
 def test_no_commercial_grade_below_the_minimum():
     assert evaluate(190.0, 33.2).commercial_grade is None
+
+
+@pytest.mark.parametrize(
+    "caliper,expected_grade",
+    [
+        (33.9, None),  # justo debajo del minimo comercial: sin grado
+        (34.0, 34),    # exactamente en el minimo: inclusivo, SI tiene grado
+        (34.1, 34),    # justo encima: grado 34
+    ],
+)
+def test_commercial_grade_minimum_is_inclusive(caliper, expected_grade):
+    assert evaluate(190.0, caliper).commercial_grade == expected_grade
