@@ -15,7 +15,12 @@ el brief, este archivo:
   (``test_area_exponent_is_two_not_one``,
   ``test_volume_exponent_is_three_not_two``,
   ``test_area_and_volume_stay_consistent_after_correction``) -- no solo
-  "area y volumen bajaron".
+  "area y volumen bajaron", y
+- cierra la trampa del perfil de grosor
+  (``test_area_and_volume_recomputed_from_the_corrected_profile_match``):
+  recalcular area y volumen integrando el perfil CORREGIDO sobre el tramo
+  del fruto tiene que dar los mismos escalares que el modulo reporta. Sobre
+  el perfil crudo se iba +13.94% y +21.62%.
 
 ``test_closed_form_factor_is_the_fixed_point`` reemplaza al
 ``test_two_iterations_converge`` del brief, que FALLABA: el esquema
@@ -38,7 +43,12 @@ import numpy as np
 import pytest
 
 from codex_caliper.config import AppConfig
-from codex_caliper.geometry.measures import measure_mask
+from codex_caliper.geometry.measures import (
+    _area_mm2,
+    _volume_mm3,
+    measure_mask,
+    trim_pedicel,
+)
 from codex_caliper.parallax import correct_measures, scale_factor
 from tests.fixtures.synthetic import make_banana
 
@@ -228,18 +238,75 @@ def test_area_and_volume_stay_consistent_after_correction(raw):
 # ---------------------------------------------------------------------------
 
 
-def test_width_profile_is_left_unscaled(raw):
-    # width_profile no entra en la lista de magnitudes que el brief pide
-    # reescalar (longitud, calibre, area, volumen) -- ver docstring del
-    # modulo para la justificacion. Este test fija que la decision es
-    # deliberada: el perfil corregido es EXACTAMENTE el mismo arreglo, no
-    # una copia reescalada.
+def test_width_profile_is_scaled_on_both_axes(raw):
+    # Abscisa Y anchos, las dos a la PRIMERA potencia del mismo factor:
+    # las dos son longitudes medidas en el plano de calibracion y las dos
+    # cargan la misma sobreestimacion. Reescalar una sola dejaria el perfil
+    # en unidades mezcladas.
     cfg = _cfg()
     corrected = correct_measures(raw, cfg)
     raw_s, raw_w = raw.width_profile
     corrected_s, corrected_w = corrected.width_profile
-    np.testing.assert_array_equal(corrected_s, raw_s)
-    np.testing.assert_array_equal(corrected_w, raw_w)
+
+    np.testing.assert_allclose(corrected_s, raw_s * EXPECTED_FACTOR, rtol=1e-12)
+    np.testing.assert_allclose(corrected_w, raw_w * EXPECTED_FACTOR, rtol=1e-6)
+
+    # el dtype de cada eje se conserva (s_mm float64, w_mm float32): el
+    # perfil corregido no cuesta mas memoria que el crudo.
+    assert corrected_s.dtype == raw_s.dtype
+    assert corrected_w.dtype == raw_w.dtype
+
+
+def test_area_and_volume_recomputed_from_the_corrected_profile_match(raw):
+    """El perfil corregido y los escalares corregidos son la MISMA figura.
+
+    Este es el test que cierra la trampa: un consumidor que reproduce
+    ``trim_pedicel`` e integra el perfil sobre el tramo del fruto -- el
+    calculo exacto que ``_area_mm2`` y ``_volume_mm3`` ya hacen -- tiene que
+    aterrizar en los mismos ``area_mm2`` y ``volume_mm3`` que
+    ``correct_measures`` reporta. Con el perfil CRUDO se iba +13.94% en area
+    y +21.62% en volumen, en silencio.
+
+    Reescalar los DOS ejes es lo que lo hace salir solo: ``integral(w ds)``
+    escala con f**2 y ``integral(pi*(w/2)**2 ds)`` con f**3, que son
+    justamente los exponentes con que se corrigen los dos escalares.
+
+    Tolerancia ``rel=1e-6`` y no mas apretada porque ``w_mm`` es float32
+    (eps 1.2e-7): el residuo medido es ~3e-8 en area y ~5e-8 en volumen,
+    puro redondeo de float32 al multiplicar por el factor. Sigue siendo
+    cuatro ordenes de magnitud mas ajustado que la discrepancia del 14-22%
+    que este test existe para prevenir, y es la misma tolerancia con la que
+    Task 8 fijo la consistencia entre area y volumen.
+    """
+    cfg = _cfg()
+    corrected = correct_measures(raw, cfg)
+    s_mm, w_mm = corrected.width_profile
+
+    start, end = trim_pedicel(s_mm, w_mm, cfg.pedicel_drop_ratio)
+    abscissa_mm = np.asarray(s_mm[start : end + 1], dtype=np.float64)
+
+    assert _area_mm2(abscissa_mm, w_mm, start, end) == pytest.approx(
+        corrected.area_mm2, rel=1e-6
+    )
+    assert _volume_mm3(abscissa_mm, w_mm, start, end) == pytest.approx(
+        corrected.volume_mm3, rel=1e-6
+    )
+
+
+def test_trim_lands_on_the_same_segment_before_and_after_correction(raw):
+    # El criterio de trim_pedicel compara |dw/ds| / w_max (unidades 1/mm)
+    # contra un umbral ABSOLUTO, y esa cantidad escala con 1/f: sobre el
+    # perfil corregido crece ~6.7%. El umbral sigue bracketeando los dos
+    # casos de la calibracion de Task 8, asi que el recorte cae en los
+    # mismos indices -- de lo cual depende el test anterior. Si una
+    # recalibracion futura de _DERIVATIVE_THRESHOLD_PER_MM rompe eso, este
+    # test lo dice directamente en vez de dejarlo aparecer como una
+    # discrepancia inexplicable de area.
+    cfg = _cfg()
+    corrected = correct_measures(raw, cfg)
+    assert trim_pedicel(*corrected.width_profile, cfg.pedicel_drop_ratio) == trim_pedicel(
+        *raw.width_profile, cfg.pedicel_drop_ratio
+    )
 
 
 def test_degenerate_measures_returns_none_without_raising():

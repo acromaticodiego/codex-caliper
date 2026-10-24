@@ -81,29 +81,74 @@ el calibre (cada uno a su propio exponente) es lo unico que no rompe esa
 relacion, porque la relacion en si es un enunciado puramente geometrico
 sobre longitudes, areas y volumenes de la MISMA figura reescalada.
 
-``width_profile`` -- CRUDO, no se reescala
---------------------------------------------
+``width_profile`` -- se reescala en LOS DOS EJES
+--------------------------------------------------
 ``width_profile`` (la tupla ``(s_mm, w_mm)`` del eje medial completo, Task
-6/8) NO se incluye entre las magnitudes que ``correct_measures`` reescala,
-deliberadamente. Dos razones:
+6/8) tambien se corrige: ``s_mm`` Y ``w_mm``, las dos por el MISMO factor a
+la primera potencia. Las dos son longitudes medidas en el plano de
+calibracion y las dos cargan la misma sobreestimacion de paralaje, por el
+mismo motivo; corregir una sola, o ninguna, deja el perfil en unas unidades
+distintas de las de los cuatro escalares.
 
-1. Es el perfil COMPLETO (sin recortar el pedicelo), mientras que el
-   factor de paralaje se estima a partir del calibre del FRUTO; reescalar
-   ``w_mm`` entero mezclaria una correccion pensada para el fruto con el
-   pedicelo, que tiene su propia geometria (y probablemente otra altura
-   real).
-2. Mas de fondo: la abscisa ``s_mm`` que entrega ``width_profile_mm``
-   (Task 6) esta corregida del sesgo de escalera SOLO en total (+0.42%
-   contra la longitud analitica); su residuo LOCAL llega a +-2% (+2% en el
-   40% inicial del camino, -0.6% en la mitad final -- ver revision de Task
-   8). Esa correccion de escalera sirve como PESO de integracion (donde se
-   cancela), pero no como coordenada puntual fiable para ubicar una
-   caracteristica. Reescalar ``s_mm`` por el factor de paralaje la seguiria
-   tratando como si fuera una coordenada puntual exacta, cuando no lo es;
-   y como ningun consumidor de ``width_profile`` necesita esa abscisa ya
-   corregida de paralaje (las cuatro magnitudes que SI lo necesitan ya
-   salen corregidas por separado), no hay necesidad real de tocarla. Se
-   deja tal cual sale de ``measure_mask``, documentado como sin corregir.
+Reescalar los dos ejes es lo que hace que las magnitudes derivadas salgan
+solas, sin exponentes puestos a mano:
+
+    integral(w ds)          escala con f**2  -> coincide con ``area_mm2``
+    integral(pi*(w/2)**2 ds) escala con f**3  -> coincide con ``volume_mm3``
+
+Es decir: el perfil corregido y los escalares corregidos son la MISMA
+figura reescalada, y un consumidor que recalcule area o volumen integrando
+el perfil sobre el tramo del fruto aterriza en los numeros que este modulo
+reporta, no al lado. Esta fijado por
+``tests/test_parallax.py::test_area_and_volume_recomputed_from_the_corrected_profile_match``.
+
+Por que NO se deja crudo (era la decision anterior, y estaba mal)
+------------------------------------------------------------------
+Dejarlo crudo convertia ``BananaMeasures`` en una trampa silenciosa: un
+consumidor que reprodujera ``trim_pedicel`` e integrara el ``w_mm`` crudo
+sobre el tramo del fruto -- exactamente el calculo que ``_area_mm2`` y
+``_volume_mm3`` ya hacen -- obtenia **+13.94% en area y +21.62% en
+volumen** contra los valores corregidos que el mismo objeto reporta, sin
+ningun aviso. Hoy no es alcanzable (``BananaMeasures`` no expone
+``start``/``end`` y nada importa todavia este modulo), pero eso es una
+trampa latente, no un default seguro.
+
+Las dos razones que se habian dado no sostenian la decision:
+
+1. El residuo LOCAL de +-2% del sesgo de escalera (+2% en el 40% inicial
+   del camino, -0.6% en la mitad final -- ver revision de Task 8) es un
+   problema de la ABSCISA ``s_mm``, y no dice nada sobre si los ANCHOS
+   ``w_mm`` deben corregirse. Ademas es ortogonal al paralaje: multiplicar
+   por una constante no cambia el tamano RELATIVO de ese residuo, asi que
+   reescalar no lo mejora ni lo empeora. Sigue valiendo la advertencia de
+   Task 8 -- ``s_mm`` sirve como PESO de integracion, donde ese residuo se
+   cancela, y no como coordenada puntual exacta para ubicar una
+   caracteristica -- solo que ahora en unidades corregidas.
+2. Que el perfil incluya el pedicelo (y el factor se estime del calibre
+   del FRUTO) es un argumento legitimo, pero solo contra reescalar el
+   TRAMO DEL PEDICELO, no contra reescalar nada. Y en la practica no
+   importa: el objeto entero esta a esencialmente la misma altura sobre la
+   mesa, asi que un factor unico sobre todo el perfil es correcto a primer
+   orden. El pedicelo es mas delgado y queda marginalmente mas bajo, pero
+   se DESCARTA antes de reportar cualquier cosa, asi que perseguir un
+   factor propio para el seria una precision que nadie consume.
+
+Nota sobre el recorte, para quien reescale esto de nuevo
+---------------------------------------------------------
+El criterio de ``trim_pedicel`` compara la derivada normalizada
+``|dw/ds| / w_max``, que tiene unidades de 1/mm, contra un umbral ABSOLUTO
+(``_DERIVATIVE_THRESHOLD_PER_MM = 0.04``). Bajo un reescalado uniforme de
+los dos ejes, ``dw/ds`` queda invariante pero ``w_max`` escala con ``f``,
+asi que la cantidad comparada escala con ``1/f``: sobre el perfil corregido
+crece un ~6.7%. El umbral sigue bracketeando los dos casos de la
+calibracion de Task 8 (adelgazamiento gradual 0.0307 -> ~0.0328, pedicelo
+0.0508 -> ~0.0542, umbral 0.04) y el recorte cae en los MISMOS indices
+(verificado: ``(0, 449)`` sobre el banano de referencia, crudo y
+corregido), pero el margen del lado gradual -- el ajustado de los dos -- se
+angosta de 0.0093 a ~0.0072 1/mm. Quien recorte a partir del perfil
+CORREGIDO debe saberlo; ``measure_mask`` recorta sobre el CRUDO, antes de
+que este modulo intervenga, asi que las magnitudes reportadas no dependen
+de ese margen.
 """
 
 from __future__ import annotations
@@ -159,7 +204,10 @@ def correct_measures(
     calibre a la primera potencia, area al cuadrado, volumen al cubo (ver
     docstring del modulo).
 
-    ``width_profile`` se conserva SIN tocar -- ver docstring del modulo.
+    ``width_profile`` se reescala en LOS DOS EJES (``s_mm`` y ``w_mm``, las
+    dos a la primera potencia), para que el perfil quede en las mismas
+    unidades corregidas que los escalares y recalcular area o volumen a
+    partir de el de los mismos numeros -- ver docstring del modulo.
 
     Devuelve ``None`` sin lanzar si ``measures`` es ``None`` (mascara
     degenerada rio arriba, Task 8): una correccion aplicada a algo que no
@@ -181,10 +229,16 @@ def correct_measures(
         # division por cero ni factor negativo posibles.
         factor = 2.0 * effective_height_mm / (2.0 * effective_height_mm + raw_caliper_mm)
 
+    # Los dos ejes del perfil a la primera potencia. La multiplicacion
+    # preserva el dtype de cada arreglo (``s_mm`` float64, ``w_mm``
+    # float32), asi que el perfil corregido sigue ocupando lo mismo.
+    raw_s_mm, raw_w_mm = measures.width_profile
+
     return dataclasses.replace(
         measures,
         codex_length_mm=measures.codex_length_mm * factor,
         caliper_mm=measures.caliper_mm * factor,
         area_mm2=measures.area_mm2 * factor ** 2,
         volume_mm3=measures.volume_mm3 * factor ** 3,
+        width_profile=(raw_s_mm * factor, raw_w_mm * factor),
     )
