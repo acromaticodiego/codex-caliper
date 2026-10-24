@@ -263,6 +263,10 @@ def test_error_metrics_reports_hand_measured_length_mae_when_present():
     expected = np.mean(np.abs(np.array([180.0, 185.0, 190.0, 178.0]) - np.array([183.0, 185.0, 187.0, 181.0])))
     assert metrics.mae_length_mm == pytest.approx(expected)
     assert metrics.n_length == 4
+    # n (muestras de peso) y n_length (muestras de longitud) son conteos
+    # INDEPENDIENTES -- este fixture los pone a proposito en valores
+    # distintos (5 vs 4) para que confundir uno con el otro sea detectable.
+    assert metrics.n == 5
 
 
 def test_error_metrics_length_fields_are_none_without_hand_measured_length():
@@ -275,3 +279,47 @@ def test_error_metrics_length_fields_are_none_without_hand_measured_length():
 
     assert metrics.mae_length_mm is None
     assert metrics.n_length == 0
+
+
+def test_error_metrics_reports_the_sample_count_for_weight_metrics():
+    # Round 1, Finding 1: mae_g/mape_pct/r_squared no traian ningun conteo
+    # de cuantas filas los respaldan -- justo lo que este modulo existe
+    # para impedir. n debe ser la cantidad de filas REALMENTE usadas para
+    # las metricas de peso, que aqui es len(frame) porque ninguna fila se
+    # excluye de esas metricas (a diferencia de las de longitud).
+    volume_cm3 = np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0])
+    fit = DensityFit(g_per_cm3=0.94, r_squared=1.0, n=7)
+    frame = _density_frame(volume_cm3, fit.g_per_cm3 * volume_cm3)
+
+    metrics = error_metrics(frame, fit)
+
+    assert metrics.n == 7
+    assert metrics.n == len(frame)
+
+
+def test_error_metrics_raises_on_an_empty_frame():
+    # Round 1, Finding 2: un lote vacio es el estado INICIAL de cualquier
+    # ValidationLog, antes de la primera muestra -- no un caso de borde
+    # remoto. Sin la guarda, np.mean sobre un arreglo vacio avisa con un
+    # RuntimeWarning ("Mean of empty slice") en vez de levantar un error
+    # claro (ver evidencia de ruptura en el informe de la tarea: quitar la
+    # guarda hace que este `pytest.raises` falle).
+    fit = DensityFit(g_per_cm3=0.94, r_squared=1.0, n=10)
+    empty_frame = _density_frame(np.array([]), np.array([]))
+
+    with pytest.raises(ValueError):
+        error_metrics(empty_frame, fit)
+
+
+def test_error_metrics_raises_on_a_zero_actual_weight():
+    # Un banano real nunca pesa 0 g en la bascula -- un cero ahi es un dato
+    # mal capturado, no un caso valido, y divide-por-cero en el
+    # denominador del MAPE es la misma clase de nan silencioso que un lote
+    # vacio. Una sola fila con actual_weight_g == 0.0 en medio de filas
+    # normales debe bastar para que todo el lote levante.
+    volume_cm3 = np.array([10.0, 20.0, 30.0])
+    actual_weight_g = np.array([9.4, 18.8, 0.0])
+    fit = DensityFit(g_per_cm3=0.94, r_squared=1.0, n=3)
+
+    with pytest.raises(ValueError):
+        error_metrics(_density_frame(volume_cm3, actual_weight_g), fit)

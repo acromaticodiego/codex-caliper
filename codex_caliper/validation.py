@@ -139,18 +139,25 @@ class DensityFit:
 class ErrorMetrics:
     """Metricas de error del peso predicho (y, si hay datos, de la longitud).
 
-    ``mae_g``, ``mape_pct`` y ``r_squared`` cubren el peso -- la validacion
-    por bascula, que mide si la segmentacion del banano es correcta.
+    ``mae_g``, ``mape_pct``, ``r_squared`` y ``n`` cubren el peso -- la
+    validacion por bascula, que mide si la segmentacion del banano es
+    correcta. Nunca se reporta una cifra de error sin decir sobre cuantas
+    muestras se calculo (regla del modulo): ``n`` es ese conteo. Ninguna
+    fila se excluye de las metricas de peso (a diferencia de las de
+    longitud, mas abajo), asi que ``n == len(frame)`` siempre -- ver
+    ``error_metrics`` para por que eso es asi y no un ``len(frame)`` suelto.
+
     ``mae_length_mm`` cubre la longitud medida a mano (spec §7.b): es
     ``None`` cuando ninguna fila del lote trae ``actual_length_mm``, para
     que validar solo con bascula (sin regla) no falle ni invente un numero.
     ``n_length`` cuenta cuantas filas SI tenian longitud a mano, que puede
-    ser menor que el total de filas.
+    ser (y en la practica suele ser) menor que ``n``.
     """
 
     mae_g: float
     mape_pct: float
     r_squared: float
+    n: int
     mae_length_mm: float | None
     n_length: int
 
@@ -251,9 +258,30 @@ def error_metrics(frame: pd.DataFrame, density: DensityFit) -> ErrorMetrics:
     MAE de la longitud (``codex_length_mm`` contra esa columna) sobre las
     filas donde el valor no es nulo -- ver docstring del modulo y de
     ``ErrorMetrics``.
+
+    Exige al menos una fila: un lote vacio (el estado inicial de cualquier
+    ``ValidationLog``, antes de registrar la primera muestra) no debe
+    convertirse silenciosamente en ``nan`` -- ``np.mean`` de un arreglo
+    vacio y la division del MAPE lo harian sin avisar, con un
+    ``RuntimeWarning`` de regalo, y "MAE: nan g" es exactamente la cifra
+    sin sentido que el objetivo de este modulo prohibe publicar. Por la
+    misma razon se exige que ningun ``actual_weight_g`` sea cero: una
+    bascula no pesa 0 g un banano real, asi que un cero ahi es un dato mal
+    capturado, no un caso valido que haya que tolerar en silencio -- y
+    dividir por el en el denominador del MAPE produce el mismo tipo de
+    ``nan``/``inf`` que un lote vacio.
     """
+    n = len(frame)
+    if n == 0:
+        raise ValueError("error_metrics requires at least one row, got an empty frame")
+
     volume_cm3 = frame["volume_mm3"].to_numpy(dtype=float) / 1000.0
     actual_weight_g = frame["actual_weight_g"].to_numpy(dtype=float)
+    if np.any(actual_weight_g == 0.0):
+        raise ValueError(
+            "error_metrics got a row with actual_weight_g == 0.0 (a real banana cannot weigh 0 g)"
+        )
+
     predicted_weight_g = density.g_per_cm3 * volume_cm3
 
     error = predicted_weight_g - actual_weight_g
@@ -261,6 +289,9 @@ def error_metrics(frame: pd.DataFrame, density: DensityFit) -> ErrorMetrics:
     mape_pct = float(np.mean(np.abs(error) / np.abs(actual_weight_g)) * 100.0)
     r_squared = _r_squared_uncentered(actual_weight_g, predicted_weight_g)
 
+    # Ninguna fila se excluye de las metricas de peso de arriba -- a
+    # diferencia de las de longitud, abajo -- asi que n == len(frame), no
+    # un conteo filtrado. Ver ErrorMetrics.n.
     mae_length_mm: float | None = None
     n_length = 0
     if "actual_length_mm" in frame.columns:
@@ -275,6 +306,7 @@ def error_metrics(frame: pd.DataFrame, density: DensityFit) -> ErrorMetrics:
         mae_g=mae_g,
         mape_pct=mape_pct,
         r_squared=r_squared,
+        n=n,
         mae_length_mm=mae_length_mm,
         n_length=n_length,
     )
