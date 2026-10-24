@@ -525,7 +525,23 @@ def test_outer_curve_is_the_longer_of_the_two_chains():
     assert len(outer) == max(len(a), len(b))
 
 def test_codex_length_matches_outer_curve_ground_truth_within_2_percent():
-    mask, gt = make_banana(220.0, 0.85, 36.0, 0.2)
+    # OJO -- defecto corregido del plan original, medido en ejecucion.
+    # El fixture literal (220.0, 0.85, 36.0, 0.2) NO puede pasar esta asercion,
+    # por dos razones acumuladas:
+    #   1. `GroundTruth.outer_length_mm` es el riel puro (R+w/2)*theta = 202.30 mm
+    #      y EXCLUYE las tapas; la cadena medida entre las dos puntas incluye
+    #      necesariamente material de tapa. Con w=36 cada tapa mide pi*w/2 =
+    #      56.55 mm, un 28% del riel. Medido: +40.83% de error.
+    #   2. La punta del eje medial de una capsula esta en el CENTRO de la tapa,
+    #      a w/2 del borde, no sobre el. Todo el semicirculo equidista, asi que
+    #      el punto de corte lo decide el ruido de rasterizado: medido, 85 y 97
+    #      puntos del contorno empatados a menos de 1 px.
+    # El plan confundio "extremo del eje medial" con "punta sobre el borde".
+    # En un banano real casi coinciden porque la punta es afilada y el radio
+    # local tiende a cero; en una capsula de tapa redonda distan 18 mm.
+    # Fixture correcto: extremos afilados, de modo que la tapa sea despreciable
+    # frente al riel. Documentar el porque en el modulo de test.
+    mask, gt = make_banana(220.0, 0.85, 4.0, 0.2, blossom_taper_mm=3.5)
     got = smoothed_arc_length_mm(outer_curve(contour_of(mask), tips), 0.2)
     assert got == pytest.approx(gt.outer_length_mm, rel=0.02)
 

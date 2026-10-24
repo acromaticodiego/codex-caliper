@@ -552,6 +552,30 @@ Mezclar ambas impide saber de dónde viene el error.
 
 ---
 
+## 7.b Limite de exactitud del recorte de pedicelo (medido, 2026-10-23)
+
+El recorte corta donde el ancho cae por debajo de la meseta, que **no es exactamente** la
+base geométrica del pedicelo. Medido sobre cinco geometrías sintéticas con un pedicelo de
+25 mm, lo que el recorte elimina cae entre el **82 % y el 105 %** de esa longitud: el corte
+aterriza dentro de unos **±3 mm** de la base real.
+
+Importa porque el objetivo declarado del sistema es ±1 mm. **En fruta con cabo, la
+incertidumbre de colocación del corte domina sobre la del resto de la cadena de medición.**
+No es un defecto de implementación: es la precisión alcanzable del criterio por derivada tal
+como está definido, y se buscó un refinamiento del punto de corte sin encontrar ninguno que
+no reabriera la inestabilidad en calibres pequeños.
+
+Consecuencias que hay que asumir:
+
+- La validación de §7 etapa 10 debe incluir **longitud medida a mano con regla sobre fruta
+  real con cabo**, no solo peso en báscula: el peso no es sensible a dónde se corta el
+  pedicelo, así que la validación por báscula no cubre este error.
+- La publicación debe declarar este límite junto al resto. Es exactamente el tipo de
+  limitación que el §4 (anti-objetivos) obliga a decir en voz alta.
+- Si se quisiera cerrar, el camino no es ajustar umbrales sino cambiar de criterio: por
+  ejemplo, ajustar dos rectas al perfil de grosor y tomar su intersección como base del
+  pedicelo, en vez de cruzar un umbral.
+
 ## 8. Interfaz
 
 Decisión del autor: **el video es lo que vende**. El reparto del espacio se subordina a eso.
@@ -695,6 +719,7 @@ la cámara a 300 mm.
 | Fondo con contraste insuficiente | contorno impreciso → todas las medidas mal | superficie mate azul o verde; validar temprano |
 | Espesor de marcador no medido | ~1 % de error sistemático | medir con calibrador y parametrizar |
 | Escalonado de píxeles | sobrestimación sistemática de longitud | spline suavizante antes de integrar |
+| **El eje medial retrocede de los bordes planos** | la punta detectada queda dentro del cuerpo, no en el corte | inherente al método, no corregible: medido 3.6–3.7 mm en un corte de 9 mm de ancho y ~17.6 mm en uno de 36 mm. Acotado en la práctica porque el pedicelo se descarta, pero el fixture sintético tiene tapa redondeada y **no reproduce el caso**: hay que validarlo con fruta real de corte de cuchillo |
 | Umbral de recorte del pedicelo mal ajustado | longitud sobrestimada (no recorta) o subestimada (recorta fruto) | ajuste empírico por derivada del perfil de grosor; validar contra medida manual |
 | **Anillo de zoom o foco movido tras calibrar** | **todas las medidas corruptas en silencio** | **apretar prisioneros + marca de pintura; verificar antes de cada sesión** |
 | Superficie de trabajo blanda (alfombra) | el plano deja de ser plano | base rígida obligatoria bajo la cartulina |
