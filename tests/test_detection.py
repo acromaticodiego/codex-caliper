@@ -142,6 +142,81 @@ def test_every_n_frames_one_infers_every_frame():
     assert fake_model.call_count == 3
 
 
+def test_rescales_bbox_and_mask_from_infer_size_to_original_frame_size():
+    """Fix round 1, Finding 1 (reviewer): el resto de este archivo usa
+    `infer_size == ancho == alto del frame`, lo que hace `scale_x == scale_y
+    == 1.0` -- todo el camino de reescalado (bbox y mascara) es un no-op
+    bajo esos tests, y un scale_x/scale_y invertido, un orden de argumentos
+    invertido en `cv2.resize`, o un redondeo fuera de lugar pasarian
+    desapercibidos. Aqui el frame es NO CUADRADO (80 alto x 120 ancho) con
+    `infer_size=40`, asi que scale_x=3.0 != scale_y=2.0: cualquier
+    intercambio de ejes cambia el resultado, y se verifica contra
+    coordenadas concretas (no solo "cambio de tamano")."""
+    original_h, original_w = 80, 120
+    infer_size = 40
+
+    mask_infer = np.zeros((infer_size, infer_size), dtype=np.uint8)
+    mask_infer[6:14, 4:10] = 1  # filas 6..13, columnas 4..9 en espacio de inferencia
+
+    boxes = _FakeBoxes(cls=[46], conf=[0.9], ids=[1], xyxy=[[4, 6, 10, 14]])
+    masks = _FakeMasks([mask_infer])
+    fake_model = _FakeModel(_FakeResult(boxes, masks))
+    det = BananaDetector(infer_size=infer_size, model=fake_model)
+    frame = np.zeros((original_h, original_w, 3), dtype=np.uint8)
+
+    out = det.detect(frame)
+
+    assert len(out) == 1
+    inst = out[0]
+    # x1*scale_x, y1*scale_y, x2*scale_x, y2*scale_y = 4*3, 6*2, 10*3, 14*2
+    assert inst.bbox == (12, 12, 30, 28)
+    assert inst.mask.shape == (original_h, original_w)
+    assert bool(inst.mask[20, 21]) is True  # dentro de la region reescalada
+    assert bool(inst.mask[70, 100]) is False  # claramente afuera de ella
+
+
+def test_missing_track_ids_get_unique_synthetic_ids_not_a_shared_sentinel():
+    """Fix round 1, Finding 2 (coordinador, ruling): cuando el tracker
+    todavia no produjo ids (`boxes.id is None`), sintetizar un unico
+    centinela compartido para todas las detecciones de ese frame fabrica la
+    colision que `CentroidReassigner.assign` (Ruling 4) existe para evitar
+    -- y aqui no hay reasignacion previa que pueda repararla despues,
+    porque las instancias YA llegan indistinguibles. Dos bananos detectados
+    sin ids deben recibir dos track_id DISTINTOS (y reconociblemente
+    sinteticos: negativos)."""
+    size = _FRAME_SIZE
+    mask_a = np.zeros((size, size), dtype=np.uint8)
+    mask_a[5:10, 5:10] = 1
+    mask_b = np.zeros((size, size), dtype=np.uint8)
+    mask_b[40:45, 40:45] = 1
+    boxes = _FakeBoxes(cls=[46, 46], conf=[0.9, 0.8], ids=None, xyxy=[[5, 5, 10, 10], [40, 40, 45, 45]])
+    masks = _FakeMasks([mask_a, mask_b])
+    fake_model = _FakeModel(_FakeResult(boxes, masks))
+    det = BananaDetector(infer_size=size, model=fake_model)
+
+    out = det.detect(_blank_frame(size))
+
+    assert len(out) == 2
+    ids = [i.track_id for i in out]
+    assert len(set(ids)) == 2  # ningun id compartido entre las dos detecciones
+    assert all(tid < 0 for tid in ids)  # reconociblemente sinteticos, no del tracker
+
+
+def test_zero_detections_returns_an_empty_result_without_raising():
+    """Fix round 1, Finding 3 (coordinador): ultralytics devuelve
+    `boxes=None` y `masks=None` cuando no detecto nada en el frame -- el
+    caso MAS ORDINARIO del sistema (un frame sin fruta a la vista), no un
+    caso raro. Sin guarda esto revienta con `AttributeError` en
+    `masks.data`. La Task 14 depende de que este camino devuelva `[]` en
+    vez de propagar la excepcion."""
+    fake_model = _FakeModel(_FakeResult(boxes=None, masks=None))
+    det = BananaDetector(infer_size=_FRAME_SIZE, model=fake_model)
+
+    out = det.detect(_blank_frame())
+
+    assert out == []
+
+
 # ---------------------------------------------------------------------------
 # CentroidReassigner
 # ---------------------------------------------------------------------------

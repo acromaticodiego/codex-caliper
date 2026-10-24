@@ -139,9 +139,19 @@ class BananaDetector:
     def _parse_result(self, result, original_w: int, original_h: int) -> list[Instance]:
         """Convierte un resultado crudo de ``model.track`` en ``list[Instance]``,
         filtrando la clase banana y reescalando cajas/mascaras a (``original_w``,
-        ``original_h``)."""
+        ``original_h``).
+
+        ``boxes`` y ``masks`` llegan ambos en ``None`` cuando ultralytics no
+        detecto nada en el frame -- el caso mas ORDINARIO del sistema (un
+        frame sin fruta a la vista), no uno raro. Sin esta guarda,
+        ``masks.data`` revienta con ``AttributeError`` en el frame mas
+        comun que el rig va a ver. La respuesta correcta a "no hay nada" es
+        la lista vacia, no una excepcion.
+        """
         boxes = result.boxes
         masks = result.masks
+        if boxes is None or masks is None:
+            return []
 
         class_ids = np.asarray(boxes.cls)
         confidences = np.asarray(boxes.conf)
@@ -150,7 +160,23 @@ class BananaDetector:
 
         raw_track_ids = boxes.id
         if raw_track_ids is None:
-            track_ids = np.full(len(class_ids), -1)
+            # El tracker todavia no produjo ids (pasa, entre otros casos, en
+            # el primer frame). Un unico centinela compartido (p.ej. -1 para
+            # todas) FABRICARIA la colision que CentroidReassigner.assign
+            # existe para evitar (Ruling 4): dos o tres bananos detectados
+            # en este frame compartirian un solo track_id, y
+            # MeasurementAggregator.push (Task 11) los poolearia como si
+            # fueran un solo fruto. A diferencia de una colision que llega
+            # DESPUES de la reasignacion por centroide, esta no se puede
+            # reparar aguas abajo: dos instancias que ya entran con el mismo
+            # id son indistinguibles para `assign`. La spec (S7, etapa 4)
+            # cuenta con la reasociacion por centroide para resolver
+            # precisamente esto -- y esa reasociacion solo puede funcionar
+            # si las instancias LLEGAN distinguibles. Por eso cada instancia
+            # sin id de tracker recibe un negativo UNICO (-1, -2, -3, ...);
+            # ademas de evitar la colision, el signo negativo deja legible
+            # aguas abajo que ese id no vino del tracker.
+            track_ids = -1 - np.arange(len(class_ids))
         else:
             track_ids = np.asarray(raw_track_ids)
 
