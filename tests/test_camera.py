@@ -7,6 +7,7 @@ ninguna camara real y deben pasar igual con o sin una conectada a la maquina.
 
 from __future__ import annotations
 
+import threading
 import time
 
 import numpy as np
@@ -218,7 +219,17 @@ def test_stop_returns_promptly_even_if_read_is_blocked(qtbot, monkeypatch):
     """Ruling 2: si el hilo esta parado dentro de un cap.read() que tarda en
     volver -- la camara se desenchufo a media lectura --, stop() debe
     retornar de todos modos, acotado, en vez de esperar sin limite a un
-    hilo que no puede revisar la bandera de parada mientras esta bloqueado."""
+    hilo que no puede revisar la bandera de parada mientras esta bloqueado.
+
+    Sincronizacion: ``isRunning()`` solo dice que el hilo del SO arranco, no
+    que ``run()`` ya llego a la lectura bloqueante -- entre medio estan
+    ``open_capture``, ``isOpened`` y la lectura de ``actual_size``. Si
+    llamaramos a stop() basados solo en isRunning(), podria llegar antes de
+    que el bucle revise la bandera siquiera una vez, y entonces read() jamas
+    se ejecutaria: la prueba pasaria igual, pero sin haber probado nada.
+    Por eso se sincroniza con un Event que ``read()`` marca justo al entrar,
+    y solo se mide stop() una vez confirmado que la lectura bloqueante ya
+    esta en curso."""
 
     class SlowFirstReadCapture(FakeCapture):
         """La primera lectura tarda mas que el timeout de stop() (simula el
@@ -226,22 +237,25 @@ def test_stop_returns_promptly_even_if_read_is_blocked(qtbot, monkeypatch):
         cuenta via la politica de desconexion y no queda nada corriendo de
         fondo al salir del test."""
 
-        def __init__(self, *a, **kw):
+        def __init__(self, *a, started_reading, **kw):
             super().__init__(*a, **kw)
             self._first_call = True
+            self._started_reading = started_reading
 
         def read(self):
             if self._first_call:
                 self._first_call = False
+                self._started_reading.set()
                 time.sleep(3.0)  # mas largo que _STOP_WAIT_TIMEOUT_MS (2s)
             return False, None
 
-    fake_capture = SlowFirstReadCapture(frames=[])
+    started_reading = threading.Event()
+    fake_capture = SlowFirstReadCapture(frames=[], started_reading=started_reading)
     monkeypatch.setattr(camera, "open_capture", lambda *a, **kw: fake_capture)
 
     thread = CameraThread(0)
     thread.start()
-    qtbot.waitUntil(lambda: thread.isRunning(), timeout=2000)
+    assert started_reading.wait(timeout=2.0), "la lectura bloqueante nunca empezo"
 
     started = time.monotonic()
     thread.stop()
@@ -268,7 +282,96 @@ def test_capture_lost_is_emitted_when_reads_fail_repeatedly(qtbot, monkeypatch):
     monkeypatch.setattr(camera, "open_capture", lambda *a, **kw: fake_capture)
 
     thread = CameraThread(0)
-    with qtbot.waitSignal(thread.capture_lost, timeout=5000):
+    with qtbot.waitSignal(thread.capture_lost, timeout=5000) as blocker:
+        thread.start()
+
+    qtbot.waitUntil(lambda: thread.isFinished(), timeout=2000)
+    assert fake_capture.released is True
+
+    # Finding 2 (ronda de revision 1): capture_lost es texto de runtime de
+    # cara al usuario -- la razon misma por la que existe es para mostrarse
+    # en la interfaz -- asi que debe estar en ingles, como el resto del
+    # proyecto (ver IntrinsicsMismatch en intrinsics.py). Se verifica
+    # contenido, no solo que algo se emitio.
+    (message,) = blocker.args
+    assert "stopped responding" in message
+    assert "camara" not in message.lower()
+
+
+def test_stop_called_before_the_thread_begins_running_never_opens_the_camera(qtbot, monkeypatch):
+    """Finding 1 (ronda de revision 1): la carrera real era que stop()
+    llegara antes de que run() ejecutara su primera linea, y run() hacia
+    self._stop_requested.clear() ahi mismo, borrando la peticion en
+    silencio -- el bucle arrancaba igual, con la camara abierta, y stop()
+    ya habia retornado creyendo que funciono.
+
+    No se puede forzar de forma determinista que stop() llegue DURANTE esa
+    ventana especifica sin instrumentar run() (eso convertiria el test en
+    una prueba del instrumento, no del codigo). En vez de eso, se fija el
+    caso limite que la implementacion correcta debe tratar exactamente
+    igual que esa ventana: pedir stop() ANTES de llamar a start() siquiera.
+    Esto garantiza, sin ninguna carrera, que la bandera ya esta puesta
+    cuando el hilo del SO exista y run() se ejecute -- el mismo estado que
+    "stop() llego un microsegundo antes de la primera linea de run()". Si
+    run() alguna vez volviera a limpiar la bandera ahi, este test lo
+    atraparia exactamente igual que atraparia la carrera real."""
+    fake_capture = FakeCapture(frames=[_make_frame(9)])
+    monkeypatch.setattr(camera, "open_capture", lambda *a, **kw: fake_capture)
+
+    thread = CameraThread(0)
+    received = []
+    thread.frame_ready.connect(lambda f: received.append(f), Qt.ConnectionType.DirectConnection)
+
+    thread.stop()  # pedir parar ANTES de arrancar -- fuerza la peor ventana posible
+    thread.start()
+
+    qtbot.waitUntil(lambda: thread.isFinished(), timeout=2000)
+
+    assert received == [], "no debe haber capturado ningun frame si stop() llego antes de start()"
+    assert fake_capture.released is True
+
+
+def test_capture_lost_is_emitted_when_the_capture_never_opens(qtbot, monkeypatch):
+    """Finding 4: el unico otro sitio que emite capture_lost (ademas de la
+    cascada de lecturas fallidas) es cuando isOpened() devuelve False justo
+    despues de abrir -- y ningun test lo ejercia. FakeCapture ya tenia el
+    parametro opened=False sin usar."""
+    fake_capture = FakeCapture(frames=[_make_frame(1)], opened=False)
+    monkeypatch.setattr(camera, "open_capture", lambda *a, **kw: fake_capture)
+
+    thread = CameraThread(0)
+    received = []
+    thread.frame_ready.connect(lambda f: received.append(f), Qt.ConnectionType.DirectConnection)
+
+    with qtbot.waitSignal(thread.capture_lost, timeout=2000) as blocker:
+        thread.start()
+
+    qtbot.waitUntil(lambda: thread.isFinished(), timeout=2000)
+    assert received == [], "una camara que nunca abrio no debe producir ningun frame"
+    assert fake_capture.released is True
+
+    # Finding 2: mismo chequeo de idioma que en la cascada de reintentos.
+    (message,) = blocker.args
+    assert "could not be opened" in message
+    assert "camara" not in message.lower()
+
+
+def test_capture_lost_is_emitted_when_read_raises_a_driver_error(qtbot, monkeypatch):
+    """Finding 3: si cv2.VideoCapture.read() LANZA (un error de driver, no
+    simplemente un frame perdido que devuelve ok=False), el hilo no debe
+    morir en silencio sin que la interfaz se entere -- la unica cosa que la
+    Ruling 2 prohibe explicitamente. Debe convertirse en capture_lost, igual
+    que la desconexion detectada por reintentos fallidos."""
+
+    class RaisingCapture(FakeCapture):
+        def read(self):
+            raise cv2.error("simulated driver failure")
+
+    fake_capture = RaisingCapture(frames=[_make_frame(1)])
+    monkeypatch.setattr(camera, "open_capture", lambda *a, **kw: fake_capture)
+
+    thread = CameraThread(0)
+    with qtbot.waitSignal(thread.capture_lost, timeout=2000):
         thread.start()
 
     qtbot.waitUntil(lambda: thread.isFinished(), timeout=2000)

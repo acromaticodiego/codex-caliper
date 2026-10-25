@@ -110,18 +110,43 @@ class CameraThread(QThread):
         return self._actual_size
 
     def run(self) -> None:
-        """Bucle de lectura. Corre en este hilo, nunca en el de la GUI."""
-        self._stop_requested.clear()
-        capture = open_capture(
-            self._index,
-            width=self._width,
-            height=self._height,
-            fourcc=self._fourcc,
-            backend=self._backend,
-        )
+        """Bucle de lectura. Corre en este hilo, nunca en el de la GUI.
+
+        NO se llama a ``self._stop_requested.clear()`` aqui (si alguna vez se
+        llamo, fue el bug de Finding 1 de la ronda 1 de revision): el flag ya
+        arranca limpio desde ``__init__``, y si ``stop()`` llega en la
+        ventana entre ``start()`` y la primera linea de este metodo --
+        reordenamiento de hilos del SO, nada raro --, un ``clear()`` aqui
+        borraria esa peticion en silencio: el bucle de abajo arrancaria
+        igual, ``stop()`` ya habria retornado (su espera acotada agoto el
+        plazo creyendo que funciono), y quedaria una camara real abierta sin
+        que nadie lo sepa. Reinciar la misma instancia de ``CameraThread``
+        tras un ``stop()`` no es un caso de uso que el brief pida ni que
+        ningun test cubra -- YAGNI --, asi que la solucion es no limpiar
+        nunca el flag aqui.
+        """
+        capture = None
         try:
+            try:
+                capture = open_capture(
+                    self._index,
+                    width=self._width,
+                    height=self._height,
+                    fourcc=self._fourcc,
+                    backend=self._backend,
+                )
+            except cv2.error as exc:
+                self.capture_lost.emit(
+                    f"Camera {self._index} failed to open: {exc}. Check the connection "
+                    "and the device index."
+                )
+                return
+
             if not capture.isOpened():
-                self.capture_lost.emit(f"No se pudo abrir la camara {self._index}")
+                self.capture_lost.emit(
+                    f"Camera {self._index} could not be opened. Check that it is "
+                    "connected and not in use by another application."
+                )
                 return
 
             self._actual_size = (
@@ -131,13 +156,22 @@ class CameraThread(QThread):
 
             consecutive_failures = 0
             while not self._stop_requested.is_set():
-                ok, frame = capture.read()
+                try:
+                    ok, frame = capture.read()
+                except cv2.error as exc:
+                    self.capture_lost.emit(
+                        f"Camera {self._index} reported a driver error and stopped: "
+                        f"{exc}. Reconnect the camera and restart capture."
+                    )
+                    return
+
                 if not ok or frame is None:
                     consecutive_failures += 1
                     if consecutive_failures >= _MAX_CONSECUTIVE_READ_FAILURES:
                         self.capture_lost.emit(
-                            f"La camara {self._index} dejo de responder tras "
-                            f"{consecutive_failures} lecturas fallidas seguidas"
+                            f"Camera {self._index} stopped responding after "
+                            f"{consecutive_failures} consecutive failed reads. Check "
+                            "the USB connection and restart capture."
                         )
                         return
                     # Espera interrumpible: si stop() llega durante la espera,
@@ -149,7 +183,8 @@ class CameraThread(QThread):
                 consecutive_failures = 0
                 self.frame_ready.emit(frame.copy())
         finally:
-            capture.release()
+            if capture is not None:
+                capture.release()
 
     def stop(self) -> None:
         """Pide al bucle que termine y espera, acotado, a que lo haga.
