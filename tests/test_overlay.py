@@ -1,0 +1,357 @@
+"""Tests del overlay de cotas sobre el frame (Task 17).
+
+El brief de esta tarea tenia dos defectos de datos y una prueba imposible de
+escribir; las correcciones (rulings del encargo) se verifican aqui, no solo
+se mencionan:
+
+1. **No hay bbox.** ``BananaResult`` (Task 14) solo trae ``mask`` -- el bbox
+   vive en ``Instance`` (Task 12) y el pipeline no lo propaga a proposito.
+   ``text_anchor_for`` deriva el ancla de la mascara booleana.
+
+2. **Piso de incertidumbre.** ``aggregation.py`` calcula la desviacion con
+   ``np.std`` sin ``ddof``, asi que la desviacion de UNA sola muestra es
+   EXACTAMENTE 0.0. En el primer frame de cada track (el caso MAS comun,
+   no un borde raro), ``length_std_mm``/``caliper_std_mm`` llegan en 0.0.
+   Sin un piso, ``format_measurement`` imprimiria precision infinita justo
+   donde el proyecto menos puede permitirselo (spec S4, anti-objetivo de
+   falsa precision). El piso es ``mm_per_px``: spec S5.1 mide que una
+   ambiguedad de borde de 1 px, a 0.2 mm/px, son 0.2 mm -- el sistema no
+   puede reclamar mas resolucion que la de su propio lienzo.
+
+3. **Sin OCR.** El brief pedia ``rendered_text_of(draw_results(...))``; leer
+   texto de vuelta de una imagen rasterizada es OCR, no existe y no se
+   puede escribir de forma fiable. ``compose_label_lines`` expone la
+   composicion de texto como funcion PURA y estas pruebas verifican las
+   cadenas, no pixeles interpretados.
+
+4. **El test de posicion del brief no discrimina.** ``text_anchor_for(a) !=
+   text_anchor_for(b)`` lo pasa cualquier funcion que varie con algo --
+   incluida una que ancle a la esquina equivocada o al indice de la lista
+   en vez de a la mascara. Las pruebas de aqui comprueban una propiedad
+   mas fuerte: el ancla queda genuinamente DENTRO/cerca de la extension
+   real de la mascara y se TRASLADA exactamente lo que se traslada la
+   mascara.
+"""
+
+from __future__ import annotations
+
+import cv2
+import numpy as np
+import pytest
+
+from codex_caliper.aggregation import TEMPORAL_WINDOW, TrackAggregate
+from codex_caliper.aruco_tools import CalibrationState, MarkerDetection
+from codex_caliper.codex import CodexVerdict
+from codex_caliper.pipeline import BananaResult
+from codex_caliper.ui.overlay import (
+    compose_label_lines,
+    draw_marker_overlay,
+    draw_results,
+    format_measurement,
+    text_anchor_for,
+)
+
+_CANVAS_SHAPE = (300, 500, 3)
+
+
+def _rectangle_mask(shape: tuple[int, int], x0: int, y0: int, x1: int, y1: int) -> np.ndarray:
+    """Mascara booleana rectangular, para no depender de datos sinteticos de otra tarea."""
+    mask = np.zeros(shape, dtype=bool)
+    mask[y0:y1, x0:x1] = True
+    return mask
+
+
+def _aggregate(
+    *,
+    track_id: int = 1,
+    samples: int = 30,
+    locked: bool = True,
+    length_mm: float = 187.34,
+    length_std_mm: float = 0.82,
+    caliper_mm: float = 38.4,
+    caliper_std_mm: float = 0.6,
+    volume_mm3: float = 1.0e5,
+) -> TrackAggregate:
+    return TrackAggregate(
+        track_id=track_id,
+        samples=samples,
+        locked=locked,
+        length_mm=length_mm,
+        length_std_mm=length_std_mm,
+        caliper_mm=caliper_mm,
+        caliper_std_mm=caliper_std_mm,
+        volume_mm3=volume_mm3,
+    )
+
+
+def _verdict(passes: bool = True) -> CodexVerdict:
+    return CodexVerdict(
+        passes=passes, length_ok=passes, caliper_ok=passes, commercial_grade=38 if passes else None
+    )
+
+
+def _result(
+    mask: np.ndarray,
+    *,
+    track_id: int = 1,
+    aggregate: TrackAggregate | None = None,
+    verdict: CodexVerdict | None = None,
+    weight_g: float | None = 124.0,
+) -> BananaResult:
+    return BananaResult(
+        track_id=track_id,
+        aggregate=aggregate if aggregate is not None else _aggregate(track_id=track_id),
+        verdict=verdict if verdict is not None else _verdict(),
+        estimated_weight_g=weight_g,
+        mask=mask,
+    )
+
+
+# ---------------------------------------------------------------------------
+# format_measurement -- el punto de aplicacion del anti-objetivo de falsa
+# precision (spec S4).
+# ---------------------------------------------------------------------------
+
+
+def test_measurement_text_is_english_and_carries_the_uncertainty():
+    assert format_measurement(187.34, 0.82) == "187.3 ± 0.8 mm"
+
+
+def test_decimals_are_capped_by_the_uncertainty():
+    # anti-objetivo del spec: nada de falsa precision
+    assert format_measurement(187.34, 5.0) == "187 ± 5 mm"
+
+
+def test_decimal_rule_at_the_floor_boundary():
+    # 0.2 mm/px es el piso (Ruling 2): a esa incertidumbre exacta, 1 decimal.
+    assert format_measurement(187.34, 0.2) == "187.3 ± 0.2 mm"
+
+
+def test_decimal_rule_rounds_a_two_digit_uncertainty_to_one_significant_figure():
+    # 12.0 mm redondeado a 1 cifra significativa es 10; con esa incertidumbre
+    # no se sostienen decimales en el valor tampoco.
+    assert format_measurement(187.34, 12.0) == "187 ± 10 mm"
+
+
+def test_zero_std_is_floored_by_default_to_the_canvas_scale():
+    # El caso degenerado real: primer frame de CUALQUIER track, std == 0.0
+    # exacto (np.std sin ddof sobre una sola muestra). Sin el piso esto
+    # imprimiria una precision que la calibracion no sostiene -- el defecto
+    # que Ruling 2 señala como alcanzable en el primer frame de cada track.
+    assert format_measurement(187.34567, 0.0) == "187.3 ± 0.2 mm"
+
+
+def test_floor_can_be_tightened_explicitly_when_the_canvas_scale_differs():
+    # draw_results conoce el mm_per_px real del frame y lo pasa explicito;
+    # el piso no queda pegado al default cuando la calibracion es otra.
+    assert format_measurement(187.34567, 0.0, floor_mm=0.1) == "187.3 ± 0.1 mm"
+
+
+def test_format_measurement_does_not_mutate_its_arguments():
+    # sanity check barato: son floats, pero coherente con la convencion del
+    # proyecto de no mutar lo que se recibe.
+    value, std = 187.34, 0.82
+    format_measurement(value, std)
+    assert (value, std) == (187.34, 0.82)
+
+
+# ---------------------------------------------------------------------------
+# text_anchor_for -- Ruling 1 (deriva de la mascara, no de un bbox que no
+# existe) y Ruling 4 (el test del brief no discrimina).
+# ---------------------------------------------------------------------------
+
+
+def test_anchor_sits_outside_the_masks_right_edge_and_near_its_top():
+    mask = _rectangle_mask(_CANVAS_SHAPE[:2], 30, 40, 70, 120)
+    ax, ay = text_anchor_for(mask)
+    ys, xs = np.nonzero(mask)
+    assert ax > int(xs.max())
+    assert int(ys.min()) <= ay <= int(ys.min()) + 40
+
+
+def test_anchor_translates_exactly_with_the_mask():
+    # la propiedad fuerte que el test del brief no verificaba: un ancla que
+    # dependiera del indice en la lista, o de la esquina equivocada, no
+    # pasaria esto para un desplazamiento arbitrario.
+    base = _rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150)
+    shifted = _rectangle_mask(_CANVAS_SHAPE[:2], 130, 70, 170, 170)
+    ax, ay = text_anchor_for(base)
+    bx, by = text_anchor_for(shifted)
+    assert (bx - ax, by - ay) == (80, 20)
+
+
+def test_labels_follow_the_banana_position():
+    # version corregida del nombre del brief: la propiedad real es que dos
+    # posiciones distintas producen anclas distintas Y consistentes con la
+    # extension de cada mascara (no solo "distintas", que cualquier cosa
+    # que varie de cualquier forma ya cumpliria).
+    at_left = _rectangle_mask(_CANVAS_SHAPE[:2], 20, 50, 60, 150)
+    at_right = _rectangle_mask(_CANVAS_SHAPE[:2], 380, 50, 420, 150)
+    left_anchor = text_anchor_for(at_left)
+    right_anchor = text_anchor_for(at_right)
+    assert left_anchor != right_anchor
+    assert right_anchor[0] > left_anchor[0]
+
+
+# ---------------------------------------------------------------------------
+# compose_label_lines -- Ruling 3: funcion pura, probada sobre cadenas.
+# ---------------------------------------------------------------------------
+
+
+def test_locked_result_label_shows_verdict_length_caliper_and_weight_in_order():
+    result = _result(_rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150))
+    lines = compose_label_lines(result, mm_per_px=0.2)
+    assert lines == [
+        "#1 OK",
+        "L 187.3 ± 0.8 mm",
+        "CAL 38.4 ± 0.6 mm",
+        "124 g",
+    ]
+
+
+def test_locked_result_that_fails_codex_says_so():
+    result = _result(
+        _rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150),
+        verdict=_verdict(passes=False),
+    )
+    assert compose_label_lines(result, mm_per_px=0.2)[0] == "#1 FAIL"
+
+
+def test_missing_weight_omits_the_weight_line():
+    result = _result(_rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150), weight_g=None)
+    lines = compose_label_lines(result, mm_per_px=0.2)
+    assert len(lines) == 3
+    assert not any("g" in line.split() for line in lines)
+
+
+def test_unlocked_results_are_drawn_with_a_progress_indicator():
+    unlocked = _result(
+        _rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150),
+        aggregate=_aggregate(samples=19, locked=False),
+    )
+    lines = compose_label_lines(unlocked, mm_per_px=0.2)
+    assert any("19/30" in line for line in lines)
+
+
+def test_unlocked_result_label_omits_measurement_lines():
+    # mientras no esta "locked" la ventana sigue ruidosa (Task 11); mostrar
+    # L/CAL/peso en ese momento seria exactamente el tipo de numero
+    # plausible-pero-inestable que el proyecto evita en otros cinco sitios.
+    unlocked = _result(
+        _rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150),
+        aggregate=_aggregate(samples=19, locked=False),
+    )
+    lines = compose_label_lines(unlocked, mm_per_px=0.2)
+    assert not any(line.startswith("L ") for line in lines)
+    assert not any(line.startswith("CAL ") for line in lines)
+    assert not any(line.endswith(" g") for line in lines)
+
+
+def test_locked_result_label_has_no_progress_indicator():
+    # la otra mitad del mismo defecto potencial: la barra de progreso no
+    # debe sobrevivir una vez que la medida quedo fija.
+    locked = _result(_rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150))
+    lines = compose_label_lines(locked, mm_per_px=0.2)
+    assert not any(f"/{TEMPORAL_WINDOW}" in line for line in lines)
+
+
+# ---------------------------------------------------------------------------
+# draw_results -- coloca las etiquetas sobre una COPIA del lienzo.
+# ---------------------------------------------------------------------------
+
+
+def test_draw_results_does_not_mutate_the_input_canvas():
+    canvas = np.zeros(_CANVAS_SHAPE, np.uint8)
+    before = canvas.copy()
+    mask = _rectangle_mask(_CANVAS_SHAPE[:2], 50, 100, 150, 200)
+    draw_results(canvas, [_result(mask)], 0.2)
+    assert np.array_equal(canvas, before)
+
+
+def test_draw_results_paints_near_each_results_own_anchor_regardless_of_list_order():
+    # el banano de la derecha va PRIMERO en la lista y el de la izquierda
+    # SEGUNDO -- a proposito, para que un bug que ancle por indice de lista
+    # (en vez de por la mascara de cada resultado) no pueda esconderse
+    # detras de un orden casual que coincida con la posicion espacial.
+    canvas = np.zeros(_CANVAS_SHAPE, np.uint8)
+    mask_left = _rectangle_mask(_CANVAS_SHAPE[:2], 20, 50, 60, 150)
+    mask_right = _rectangle_mask(_CANVAS_SHAPE[:2], 300, 50, 340, 150)
+    left_result = _result(mask_left, track_id=1)
+    right_result = _result(mask_right, track_id=2)
+
+    out = draw_results(canvas, [right_result, left_result], 0.2)
+
+    for mask in (mask_left, mask_right):
+        ax, ay = text_anchor_for(mask)
+        region = out[max(ay - 5, 0) : ay + 70, max(ax - 5, 0) : ax + 220]
+        assert region.max() > 0, "no se dibujo nada cerca del ancla propia de esta mascara"
+
+    # La comprobacion de arriba sola NO discrimina: un bug que baraje que
+    # ancla le toca a cada resultado (p.ej. ``anchors[idx - 1]`` en vez de
+    # ``anchors[idx]``) sigue pintando ALGO cerca de cada ancla -- solo que
+    # es la etiqueta del OTRO banano. Dos track_id distintos (1 vs 2)
+    # producen texto distinto ("#1 ..." vs "#2 ..."); se renderiza cada
+    # resultado SOLO (sin el otro) para saber como se ve SU etiqueta en SU
+    # propio ancla, y se compara pixel a pixel contra la region
+    # correspondiente del render conjunto. No es OCR: no se interpreta
+    # ningun pixel, solo se compara un recorte de imagen contra otro.
+    solo_left = draw_results(canvas, [left_result], 0.2)
+    solo_right = draw_results(canvas, [right_result], 0.2)
+    ax, ay = text_anchor_for(mask_left)
+    bx, by = text_anchor_for(mask_right)
+    region_left_together = out[max(ay - 5, 0) : ay + 70, max(ax - 5, 0) : ax + 220]
+    region_left_solo = solo_left[max(ay - 5, 0) : ay + 70, max(ax - 5, 0) : ax + 220]
+    region_right_together = out[max(by - 5, 0) : by + 70, max(bx - 5, 0) : bx + 220]
+    region_right_solo = solo_right[max(by - 5, 0) : by + 70, max(bx - 5, 0) : bx + 220]
+    assert np.array_equal(region_left_together, region_left_solo), (
+        "la etiqueta junto al ancla izquierdo no coincide con la etiqueta propia de ese banano"
+    )
+    assert np.array_equal(region_right_together, region_right_solo), (
+        "la etiqueta junto al ancla derecho no coincide con la etiqueta propia de ese banano"
+    )
+
+
+def test_draw_results_with_no_results_returns_an_unchanged_copy():
+    canvas = np.zeros(_CANVAS_SHAPE, np.uint8)
+    out = draw_results(canvas, [], 0.2)
+    assert np.array_equal(out, canvas)
+    assert out is not canvas
+
+
+# ---------------------------------------------------------------------------
+# draw_marker_overlay -- el estado de calibracion se deriva del CONTEO de
+# detecciones, igual que ``aruco_tools.calibration_state``; no hace falta
+# un parametro extra para saber si esta OK/DEGRADED/BLOCKED.
+# ---------------------------------------------------------------------------
+
+
+def _marker(id_: int, cx: float, cy: float, half: float = 15.0) -> MarkerDetection:
+    corners = np.array(
+        [[cx - half, cy - half], [cx + half, cy - half], [cx + half, cy + half], [cx - half, cy + half]],
+        dtype=np.float32,
+    )
+    return MarkerDetection(id=id_, corners=corners)
+
+
+def test_draw_marker_overlay_does_not_mutate_the_input_frame():
+    frame = np.zeros((200, 200, 3), np.uint8)
+    before = frame.copy()
+    draw_marker_overlay(frame, [_marker(1, 50, 50)])
+    assert np.array_equal(frame, before)
+
+
+def test_draw_marker_overlay_draws_near_every_detection():
+    frame = np.zeros((200, 200, 3), np.uint8)
+    detections = [_marker(1, 40, 40), _marker(2, 160, 160)]
+    out = draw_marker_overlay(frame, detections)
+    for detection in detections:
+        x0, y0 = detection.corners.min(axis=0).astype(int)
+        x1, y1 = detection.corners.max(axis=0).astype(int)
+        region = out[max(y0 - 5, 0) : y1 + 25, max(x0 - 5, 0) : x1 + 25]
+        assert region.max() > 0
+
+
+def test_draw_marker_overlay_handles_zero_detections_without_raising():
+    frame = np.zeros((200, 200, 3), np.uint8)
+    out = draw_marker_overlay(frame, [])
+    assert np.array_equal(out, frame)
