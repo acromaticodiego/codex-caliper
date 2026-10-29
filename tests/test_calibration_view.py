@@ -40,6 +40,7 @@ import math
 import cv2
 import numpy as np
 import pytest
+from PySide6.QtCore import Qt
 
 from codex_caliper.aruco_tools import CalibrationState
 from codex_caliper.config import AppConfig
@@ -260,6 +261,30 @@ def test_run_calibration_requires_at_least_one_captured_pose(qtbot):
         view.run_calibration()
 
 
+def test_clicking_run_calibration_with_no_poses_shows_a_message_instead_of_crashing(qtbot, capsys):
+    """Fix round 1, Finding 1: clicking "Run calibration" before capturing
+    any pose used to wire straight into ``run_calibration()``, whose
+    ``ValueError`` (pinned by the test above, at the API level) reached
+    stderr as an unhandled traceback instead of the status label -- a
+    traceback on the console is exactly the "looks like a script" tell
+    spec S4 forbids. This exercises the CLICK path, not the API: calling
+    ``run_calibration()`` directly (as the test above does, on purpose)
+    would not have caught the bug, since the raise itself is correct and
+    expected there."""
+    view = IntrinsicCalibrationView(image_size=IMAGE_SIZE)
+    qtbot.addWidget(view)
+    view.show()
+    qtbot.waitExposed(view)
+
+    qtbot.mouseClick(view._calibrate_button, Qt.MouseButton.LeftButton)
+
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err, "the click must not let the ValueError reach stderr as a traceback"
+    assert view.result_accepted is None, "a caught ValueError must not be mistaken for a rejected calibration"
+    assert "calibrate" in view._status_label.text().lower()
+    view.close()
+
+
 # ---------------------------------------------------------------------------
 # IntrinsicCalibrationView -- Ruling 2, prueba 3: contador de poses
 # ---------------------------------------------------------------------------
@@ -357,7 +382,13 @@ def test_plane_view_before_any_frame_reports_empty_state_without_crashing(qtbot)
 
     assert view.state is None
     assert view.marker_ids() == []
-    assert "mm" not in view.residual_text().lower() or "—" in view.residual_text()
+    # Fix round 1, Finding 2: la disjuncion original ("mm" not in texto OR
+    # "—" in texto) pasa con casi cualquier cadena sin "mm" -- la cadena
+    # vacia incluida -- y por lo tanto no fija nada. Se pin-ea el valor de
+    # relleno real que devuelve ``residual_text()`` antes del primer
+    # cuadro medible.
+    assert view.residual_text() == "— mm"
+    assert view.mm_per_px_text() == "— mm/px"
 
 
 # ---------------------------------------------------------------------------

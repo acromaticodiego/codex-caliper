@@ -158,13 +158,13 @@ class IntrinsicCalibrationView(QWidget):
         self._toggle_checkbox.setStyleSheet(f"color: {_INK_PRIMARY_HEX};")
         self._toggle_checkbox.toggled.connect(self._on_toggle_checked)
 
-        calibrate_button = QPushButton("Run calibration")
-        calibrate_button.clicked.connect(self.run_calibration)
+        self._calibrate_button = QPushButton("Run calibration")
+        self._calibrate_button.clicked.connect(self._on_calibrate_clicked)
 
         controls = QHBoxLayout()
         controls.addWidget(self._toggle_checkbox)
         controls.addStretch(1)
-        controls.addWidget(calibrate_button)
+        controls.addWidget(self._calibrate_button)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._preview_label, 1)
@@ -228,6 +228,38 @@ class IntrinsicCalibrationView(QWidget):
 
         self._refresh_status_label()
         return self._result_accepted
+
+    def _on_calibrate_clicked(self) -> None:
+        """Slot del boton "Run calibration": captura el ``ValueError`` que
+        ``run_calibration`` lanza sin ninguna pose capturada (fix round 1,
+        Finding 1), y lo enruta a la etiqueta de estado en vez de dejarlo
+        llegar a stderr como un traceback crudo.
+
+        El nivel de API no cambia -- ``run_calibration()`` llamado
+        directo (como hace ``tests/test_calibration_view.py::test_run_calibration_requires_at_least_one_captured_pose``)
+        sigue lanzando, y eso esta bien: un llamador programatico (Task 20,
+        u otra prueba) puede querer decidir que hacer con ese error. Esta
+        captura vive SOLO en el limite de la interfaz, donde hacer clic sin
+        haber capturado nada todavia no es un camino exotico -- es
+        literalmente lo que un operador que recien abre esta pantalla va a
+        probar primero. Spec S4 nombra "parecer un script" como
+        anti-objetivo explicito, y un traceback en consola es precisamente
+        esa senal; la guia de ``frontend-design`` tambien es directa sobre
+        esto: un fallo es un momento para dar direccion, no para callar o
+        para explotar.
+
+        Se elige capturar en el slot del click, no deshabilitar el boton
+        mientras ``pose_count == 0``: deshabilitar exige mantener ese
+        estado sincronizado en cada punto que cambia ``pose_count``
+        (``capture_pose``, y cualquier reinicio futuro), mientras que
+        capturar en el unico limite por el que entra cualquier click deja
+        un solo lugar que puede quedar desincronizado -- ninguno.
+        """
+        try:
+            self.run_calibration()
+        except ValueError as exc:
+            self._status_label.setText(f"Cannot calibrate yet: {exc}")
+            self._status_label.setStyleSheet(f"color: {_SIGNAL_WARN_HEX};")
 
     @property
     def result_accepted(self) -> bool | None:
