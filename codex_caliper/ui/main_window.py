@@ -37,11 +37,36 @@ ausencia total de intrinsecos (``load_intrinsics(None)``), que es el
 "Review Focus 5" del plan: la Task 19 construira las vistas de calibracion
 que llaman a ``load_intrinsics`` con un resultado real; aqui solo se deja
 el engranaje que las bloquea mientras no haya una calibracion valida.
+
+Correcciones de la ronda 1 de revision
+-----------------------------------------
+1. **``draw_results`` (Task 17) se aplica aqui, no en ningun otro sitio.**
+   ``update_frame_result`` recibia ``result.rectified`` crudo y se lo
+   pasaba directo a ``VideoView`` -- las cotas solo vivian en las tarjetas
+   del panel, exactamente el anti-objetivo que la spec S8 nombra ("si los
+   numeros viven unicamente en la tabla, el video pasa a ser decorativo").
+2. **El video no se congela mientras la medicion esta bloqueada.**
+   ``_on_camera_frame`` retornaba sin tocar ``video_view`` cuando
+   ``measurement_enabled`` es ``False`` (sin intrinsecos, o resolucion no
+   compatible); como el video solo se actualizaba al volver de
+   ``submit_frame`` -> worker -> ``result_ready``, el cuadro se congelaba
+   aunque la camara siguiera entregando. Ahora ese camino usa
+   ``VideoView.set_frame(None, frame)`` directamente -- el mismo camino de
+   respaldo de la Ruling 2, reutilizado: "sin calibracion, muestro el
+   crudo" es exactamente lo que corresponde aqui tambien.
+3. **Se elimino el conteo exacto de marcadores en el caso BLOCKED.**
+   La version anterior le sacaba el conteo exacto con una expresion
+   regular al texto en ingles del aviso de ``pipeline.py`` -- acoplado a
+   una redaccion ajena y sin ninguna prueba que lo fijara. Con 3
+   marcadores el estado es DEGRADED y el conteo ya esta disponible
+   estructuralmente (``plane.state``); BLOCKED es el UNICO caso que
+   necesitaba la regex, y ahi lo unico que el operador necesita saber es
+   que esta bloqueado y por que (destapar los marcadores) -- el conteo
+   exacto no cambia esa accion. Se cambio por un mensaje generico y se
+   borro el acoplamiento en vez de solo fijarlo con una prueba.
 """
 
 from __future__ import annotations
-
-import re
 
 import numpy as np
 from PySide6.QtCore import QObject, Qt, QThread, Signal
@@ -52,6 +77,7 @@ from codex_caliper.aruco_tools import CalibrationState
 from codex_caliper.camera import CameraThread
 from codex_caliper.intrinsics import Intrinsics, IntrinsicsMismatch
 from codex_caliper.pipeline import MARKER_COUNT, FrameResult, Pipeline
+from codex_caliper.ui.overlay import draw_results
 from codex_caliper.ui.side_panel import SidePanel
 from codex_caliper.ui.video_view import VideoView
 
@@ -126,7 +152,6 @@ class MainWindow(QMainWindow):
 
         self._intrinsics = intrinsics
         self._plane = None
-        self._warnings: list[str] = []
         self._camera_error: str | None = None
         self._resolution_blocked_reason: str | None = None
         self._resolution_checked = False
@@ -225,6 +250,13 @@ class MainWindow(QMainWindow):
                     self._refresh_status()
 
         if not self.measurement_enabled:
+            # Finding 2 (ronda de revision 1): la camara sigue entregando
+            # cuadros aunque la medicion este bloqueada (sin intrinsecos
+            # todavia, o resolucion no compatible) -- eso no puede congelar
+            # el video. ``rectified=None`` reusa el mismo camino de
+            # respaldo que la Ruling 2 le dio a ``VideoView`` para el
+            # cuadro BLOCKED del pipeline: mostrar el crudo en vez de nada.
+            self.video_view.set_frame(None, frame)
             return
         self.submit_frame(frame)
 
@@ -243,12 +275,25 @@ class MainWindow(QMainWindow):
         del worker), pero lo unico que hace es actualizar widgets ya
         construidos -- ``VideoView.set_frame`` ya maneja
         ``rectified is None`` (Ruling 2) sin que esta ventana tenga que
-        saber nada de ese caso."""
+        saber nada de ese caso.
+
+        Finding 1 (ronda de revision 1): ``draw_results`` (Task 17) se
+        aplica AQUI, sobre el lienzo, antes de entregarselo a
+        ``VideoView`` -- sin esto las cotas solo vivian en las tarjetas del
+        panel y el video, que es lo que la spec S8 dice que "vende", quedaba
+        decorativo. Se usa ``result.plane.mm_per_px`` (la escala REAL de
+        esta calibracion) en vez de la constante del modulo siempre que hay
+        un plano -- ``draw_results``/``format_measurement`` ya distinguen
+        ese piso de incertidumbre del default generico (ver ``overlay.py``).
+        """
         self._plane = result.plane
-        self._warnings = result.warnings
         mm_per_px = result.plane.mm_per_px if result.plane is not None else _DEFAULT_MM_PER_PX
 
-        self.video_view.set_frame(result.rectified, result.raw_undistorted)
+        rectified = result.rectified
+        if rectified is not None:
+            rectified = draw_results(rectified, result.results, mm_per_px)
+
+        self.video_view.set_frame(rectified, result.raw_undistorted)
         self.side_panel.update_results(result.results, mm_per_px)
         self._refresh_status()
 
@@ -324,23 +369,25 @@ class MainWindow(QMainWindow):
         return f"{_CHECK} Intrinsics RMS {self._intrinsics.rms_px:.2f}px", False
 
     def _markers_segment(self) -> tuple[str, bool]:
+        """Segmento de marcadores de la barra de estado.
+
+        Finding 3 (ronda de revision 1): la version anterior recuperaba el
+        conteo EXACTO del caso BLOCKED con una expresion regular sobre el
+        texto en ingles del aviso de ``pipeline.py`` -- acoplada a una
+        redaccion ajena y sin ninguna prueba que la fijara. Con 3
+        marcadores el estado es DEGRADED y el conteo ya esta disponible
+        estructuralmente (``plane.state``, sin parsear nada); BLOCKED es el
+        UNICO caso que necesitaba la regex, y ahi lo unico que importa
+        comunicar es que la medicion esta bloqueada -- el conteo exacto (2
+        vs. 1 marcador visible) no cambia la accion del operador (destapar
+        los marcadores). Se prefiere un mensaje generico, sin esa
+        dependencia, en vez de fijar el acoplamiento con una prueba.
+        """
         if self._plane is None:
-            count = self._marker_count_from_warnings()
-            label = f"{count}/{MARKER_COUNT} markers" if count is not None else "markers blocked"
-            return f"{_CROSS} {label}", True
+            return f"{_CROSS} calibration blocked", True
         if self._plane.state is CalibrationState.DEGRADED:
             return f"{_WARN} 3/{MARKER_COUNT} markers", True
         return f"{_CHECK} {MARKER_COUNT}/{MARKER_COUNT} markers", False
-
-    def _marker_count_from_warnings(self) -> int | None:
-        """Extrae "n" de un aviso de ``pipeline.py`` como "only n/4 ArUco
-        markers are visible" -- el pipeline ya cuenta los marcadores, asi
-        que esta ventana no necesita su propia deteccion para mostrarlo."""
-        for warning in self._warnings:
-            match = re.search(r"(\d+)/\d+ ArUco markers", warning)
-            if match:
-                return int(match.group(1))
-        return None
 
     def _scale_segment(self) -> str:
         if self._plane is None:

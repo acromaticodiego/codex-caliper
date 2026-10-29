@@ -29,12 +29,23 @@ que ningun test original cubria: ``rectified is None`` no puede dejar la
 ventana en negro (Ruling 2), ``capture_lost``/``actual_size`` tienen que
 notarse en la interfaz (Ruling 3), y ``Pipeline.process`` nunca puede
 correr en el hilo de la GUI (Ruling 4).
+
+Ronda de revision 1 (tres hallazgos sobre el commit e8b4afc) agrega tres
+pruebas mas, al final del archivo: ``draw_results`` (Task 17) tiene que
+aplicarse sobre el lienzo que se muestra (Finding 1, critico -- sin esto
+las cotas solo viven en el panel, el anti-objetivo exacto de la spec S8);
+el video no puede congelarse mientras la medicion esta bloqueada (Finding
+2); y el panel lateral no deja tarjetas viejas visibles tras una
+actualizacion (encontrado revisando una CAPTURA DE PANTALLA, no un conteo
+-- ver su docstring para por que la primera version de esa prueba no
+discriminaba).
 """
 
 from __future__ import annotations
 
 import numpy as np
 from PySide6.QtCore import QThread, Qt
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QFrame, QLabel
 
 from codex_caliper.aruco_tools import CalibrationState
@@ -45,6 +56,7 @@ from codex_caliper.intrinsics import Intrinsics
 from codex_caliper.pipeline import MARKER_COUNT, BananaResult, FrameResult
 from codex_caliper.aggregation import TrackAggregate
 from codex_caliper.ui.main_window import MainWindow
+from codex_caliper.ui.overlay import text_anchor_for
 from codex_caliper.ui.side_panel import SIDE_PANEL_WIDTH_PX, SidePanel
 from codex_caliper.ui.video_view import PIP_MIN_WIDTH_PX, PIP_SCALE, VideoView
 
@@ -57,6 +69,17 @@ from codex_caliper.ui.video_view import PIP_MIN_WIDTH_PX, PIP_SCALE, VideoView
 
 def _frame(width: int, height: int, value: int = 128) -> np.ndarray:
     return np.full((height, width, 3), value, dtype=np.uint8)
+
+
+def _bare_qpixmap(frame: np.ndarray) -> QPixmap:
+    """Conversion BGR -> QPixmap INDEPENDIENTE de ``video_view.py``, para
+    comparar contra lo que ``MainWindow`` termina mostrando sin acoplarse a
+    como ``video_view`` hace esa misma conversion internamente (Finding 1,
+    ronda de revision 1)."""
+    frame = np.ascontiguousarray(frame)
+    height, width = frame.shape[:2]
+    image = QImage(frame.data, width, height, frame.strides[0], QImage.Format.Format_BGR888)
+    return QPixmap.fromImage(image.copy())
 
 
 def _plane(
@@ -465,5 +488,78 @@ def test_frame_result_reaches_the_window_after_processing(qtbot):
     window.submit_frame(frame)
 
     qtbot.waitUntil(lambda: not window.video_view.main_pixmap.isNull(), timeout=2000)
+
+    window.close()
+
+
+# ---------------------------------------------------------------------------
+# Ronda de revision 1 -- tres hallazgos sobre el commit e8b4afc
+# ---------------------------------------------------------------------------
+
+
+def test_update_frame_result_draws_the_measurement_overlay_on_the_video(qtbot):
+    """Finding 1 (CRITICO, ronda de revision 1): ``update_frame_result``
+    pasaba ``result.rectified`` crudo a ``VideoView`` -- ``draw_results``
+    (Task 17) nunca se llamaba, asi que las cotas solo vivian en las
+    tarjetas del panel. La spec S8 es explicita sobre por que eso es el
+    anti-objetivo exacto del proyecto: "si los numeros viven unicamente en
+    la tabla, el video pasa a ser decorativo y la mirada se va al panel".
+
+    La forma que muerde (sugerida en la revision): comparar el lienzo
+    MOSTRADO contra el lienzo CRUDO de entrada -- si son iguales, el
+    overlay nunca se aplico, sin importar cuantas pruebas cuenten
+    resultados o lean texto del panel."""
+    window = MainWindow(intrinsics=_intrinsics())
+    qtbot.addWidget(window)
+
+    rectified = _frame(900, 600, value=235)
+    result = _banana_result(track_id=7, locked=True, passes=True)
+    window.update_frame_result(_frame_result(rectified=rectified, plane=_plane(), results=[result]))
+
+    displayed = window.video_view.main_pixmap.toImage()
+    bare = _bare_qpixmap(rectified).toImage()
+    assert displayed != bare, "el lienzo mostrado debe llevar las cotas dibujadas, no ser el lienzo crudo"
+
+    # Mas especifico que "algo cambio en algun lado": al menos un pixel
+    # DENTRO del bloque de etiqueta de ESTE resultado tiene que haber
+    # cambiado. No se compara el pixel exacto de ``text_anchor_for`` --
+    # ``cv2.putText`` dibuja con ese punto como base de la linea, asi que
+    # la tinta cae arriba/a la derecha del origen, no encima de el.
+    x, y = text_anchor_for(result.mask)
+    region_differs = any(
+        displayed.pixelColor(px, py) != bare.pixelColor(px, py)
+        for py in range(max(0, y - 20), min(displayed.height(), y + 90))
+        for px in range(max(0, x), min(displayed.width(), x + 220))
+    )
+    assert region_differs, "el bloque de etiqueta de este banano no cambio ningun pixel -- el overlay no se aplico ahi"
+
+    window.close()
+
+
+def test_video_keeps_updating_while_measurement_is_gated_off(qtbot):
+    """Finding 2 (Importante, ronda de revision 1): ``_on_camera_frame``
+    retornaba sin tocar ``video_view`` cuando ``measurement_enabled`` es
+    ``False`` -- como el video solo se actualizaba al volver de
+    ``submit_frame`` -> worker -> ``result_ready``, el cuadro se congelaba
+    aunque la camara siguiera entregando. Es exactamente la razon que la
+    Ruling 2 le dio a ``raw_undistorted``: "siempre esta presente... para
+    que la interfaz siempre tenga algo que mostrar" -- y el primer estado
+    que un operador ve, sin intrinsecos cargados todavia, es justo este.
+
+    Se llama a ``_on_camera_frame`` directamente (sin levantar un
+    ``CameraThread`` real): la mecanica de la camara ya esta cubierta por
+    otras pruebas de este archivo, lo que esta sin cubrir es la reaccion
+    de ``MainWindow`` cuando la medicion esta bloqueada."""
+    pipeline = RecordingPipeline()
+    window = MainWindow(intrinsics=None, pipeline=pipeline)
+    qtbot.addWidget(window)
+    assert window.measurement_enabled is False
+
+    frame = _frame(320, 240, value=180)
+    window._on_camera_frame(frame)
+
+    assert not window.video_view.main_pixmap.isNull(), "el video no puede quedar vacio mientras la camara entrega cuadros"
+    assert window.video_view.is_showing_raw_fallback is True
+    assert pipeline.threads == [], "ningun cuadro debe llegar al pipeline mientras la medicion esta bloqueada"
 
     window.close()
