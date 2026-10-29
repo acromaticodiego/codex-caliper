@@ -147,6 +147,28 @@ def test_floor_can_be_tightened_explicitly_when_the_canvas_scale_differs():
     assert format_measurement(187.34567, 0.0, floor_mm=0.1) == "187.3 ± 0.1 mm"
 
 
+def test_non_positive_floor_is_rejected_instead_of_silently_widened():
+    # Finding 1, ronda 1 de revision: un floor_mm <= 0 solo puede llegar
+    # por un defecto aguas arriba (p.ej. un mm_per_px de calibracion en
+    # 0.0). Ensancharlo en silencio al default del rig (0.2) mentiria
+    # sobre un piso que nunca se aplico realmente -- este caso debe
+    # explotar, no maquillarse.
+    #
+    # std_mm = 0.03 (NO 0.0) a proposito: con std_mm == 0.0,
+    # math.log10(0.0) ya lanza ValueError por su cuenta (dominio
+    # matematico), lo que haria que esta prueba "pasara" aunque la
+    # validacion explicita de floor_mm no existiera -- un accidente de
+    # implementacion que enmascararia el hueco real. Con 0.03 (positivo,
+    # no-cero) no hay ningun log10(0) de por medio: si la validacion de
+    # floor_mm no estuviera, la llamada devolveria silenciosamente
+    # "187.35 ± 0.03 mm" en vez de lanzar -- precision que el piso roto
+    # nunca verifico. Verificado con el bug deliberado, ver reporte.
+    with pytest.raises(ValueError):
+        format_measurement(187.34567, 0.03, floor_mm=0.0)
+    with pytest.raises(ValueError):
+        format_measurement(187.34567, 0.03, floor_mm=-0.5)
+
+
 def test_format_measurement_does_not_mutate_its_arguments():
     # sanity check barato: son floats, pero coherente con la convencion del
     # proyecto de no mutar lo que se recibe.
@@ -191,6 +213,29 @@ def test_labels_follow_the_banana_position():
     right_anchor = text_anchor_for(at_right)
     assert left_anchor != right_anchor
     assert right_anchor[0] > left_anchor[0]
+
+
+def test_anchor_stays_within_canvas_bounds_near_the_right_edge():
+    # Finding 2, ronda 1 de revision: una mascara que toca la ULTIMA
+    # columna del lienzo (spec S13 -- la mano entra por el borde del
+    # frame). Sin recorte, x_max + margen cae en o mas alla de
+    # canvas_w, y cv2.putText no lanza ahi -- solo recorta en silencio,
+    # asi que la etiqueta entera desaparece. El ancla tiene que quedar
+    # DENTRO del lienzo sin importar donde este el banano.
+    canvas_shape = _CANVAS_SHAPE[:2]
+    mask = _rectangle_mask(canvas_shape, 450, 120, 500, 180)
+    ax, ay = text_anchor_for(mask)
+    assert 0 <= ax < canvas_shape[1]
+    assert 0 <= ay < canvas_shape[0]
+
+
+def test_anchor_stays_within_canvas_bounds_near_the_bottom_edge():
+    # La misma proteccion, eje Y: una mascara que toca la ULTIMA fila.
+    canvas_shape = _CANVAS_SHAPE[:2]
+    mask = _rectangle_mask(canvas_shape, 200, 290, 240, 300)
+    ax, ay = text_anchor_for(mask)
+    assert 0 <= ax < canvas_shape[1]
+    assert 0 <= ay < canvas_shape[0]
 
 
 # ---------------------------------------------------------------------------
@@ -273,9 +318,19 @@ def test_draw_results_paints_near_each_results_own_anchor_regardless_of_list_ord
     # SEGUNDO -- a proposito, para que un bug que ancle por indice de lista
     # (en vez de por la mascara de cada resultado) no pueda esconderse
     # detras de un orden casual que coincida con la posicion espacial.
-    canvas = np.zeros(_CANVAS_SHAPE, np.uint8)
-    mask_left = _rectangle_mask(_CANVAS_SHAPE[:2], 20, 50, 60, 150)
-    mask_right = _rectangle_mask(_CANVAS_SHAPE[:2], 300, 50, 340, 150)
+    #
+    # Lienzo LOCAL mas ancho que el del resto del archivo (no el
+    # _CANVAS_SHAPE compartido): con el recorte de borde del Finding 2
+    # (ronda 1 de revision), un mask_right demasiado cerca del borde
+    # derecho de un lienzo angosto hace que su ancla se VOLTEE al otro
+    # lado y termine pegada a la del mask_left -- una colision de fixture
+    # con el recorte de borde, no un bug de indice de lista, que es lo
+    # que este test en particular quiere aislar. Un lienzo mas ancho deja
+    # a ambas mascaras lejos de cualquier borde y evita esa colision.
+    wide_shape = (300, 900, 3)
+    canvas = np.zeros(wide_shape, np.uint8)
+    mask_left = _rectangle_mask(wide_shape[:2], 20, 50, 60, 150)
+    mask_right = _rectangle_mask(wide_shape[:2], 600, 50, 640, 150)
     left_result = _result(mask_left, track_id=1)
     right_result = _result(mask_right, track_id=2)
 
@@ -318,6 +373,48 @@ def test_draw_results_with_no_results_returns_an_unchanged_copy():
     assert out is not canvas
 
 
+def test_draw_results_keeps_the_label_visible_when_the_mask_touches_the_right_edge():
+    # Finding 2, ronda 1 de revision. La prueba fuerte que se pidio: no
+    # solo que una aserción falle, sino que la etiqueta DESAPAREZCA de
+    # verdad sin el recorte. Esta mascara toca la ultima columna del
+    # lienzo (450..500 de un canvas de 500 de ancho); sin el recorte de
+    # text_anchor_for, el ancla x (x_max + margen = 509) cae fuera de
+    # canvas.shape[1] = 500 para las CUATRO lineas del rotulo por igual
+    # (misma x en todas), asi que cv2.putText no dibuja ni un pixel.
+    canvas = np.zeros(_CANVAS_SHAPE, np.uint8)
+    mask = _rectangle_mask(_CANVAS_SHAPE[:2], 450, 120, 500, 180)
+    out = draw_results(canvas, [_result(mask)], 0.2)
+    assert out.sum() > 0, "la etiqueta desaparecio por completo: el ancla cayo fuera del lienzo"
+
+
+def test_draw_results_keeps_the_label_visible_when_the_mask_touches_the_bottom_edge():
+    # Misma proteccion, eje Y: mascara que toca la ultima fila
+    # (290..300 de un canvas de 300 de alto). Sin el recorte, el ancla y
+    # (y_min + margen = 300) cae exactamente en canvas.shape[0] = 300 --
+    # fuera de rango para un array de 300 filas.
+    #
+    # ``out.sum() > 0`` NO discrimina aqui: incluso sin recorte, la
+    # PRIMERA linea todavia deja un borrón de tinta en las ultimas filas
+    # del lienzo (el glifo se dibuja hacia ARRIBA desde su linea base, y
+    # esa linea base cae apenas 10 px mas alla del borde -- suficiente
+    # para que una esquina del glifo siga cayendo dentro). Lo que
+    # realmente desaparece son las OTRAS TRES lineas (CAL, L y el peso),
+    # cuyo origen cae aun mas abajo, totalmente fuera de rango. Medido
+    # sin el recorte: la tinta
+    # ocupa unicamente las filas [289, 299] (un borrón de 11 filas de la
+    # primera linea); CON el recorte ocupa [217, 285] (51 filas, las
+    # cuatro lineas completas, ver reporte para los numeros exactos). La
+    # aserción comprueba que hay tinta bien por encima de donde cae ese
+    # borrón aislado -- una zona que el bug nunca alcanza.
+    canvas = np.zeros(_CANVAS_SHAPE, np.uint8)
+    mask = _rectangle_mask(_CANVAS_SHAPE[:2], 200, 290, 240, 300)
+    out = draw_results(canvas, [_result(mask)], 0.2)
+    assert out[:280].sum() > 0, (
+        "solo sobrevive un borron aislado de la primera linea cerca del borde; "
+        "el resto del rotulo (CAL / L / peso) desaparecio"
+    )
+
+
 # ---------------------------------------------------------------------------
 # draw_marker_overlay -- el estado de calibracion se deriva del CONTEO de
 # detecciones, igual que ``aruco_tools.calibration_state``; no hace falta
@@ -355,3 +452,49 @@ def test_draw_marker_overlay_handles_zero_detections_without_raising():
     frame = np.zeros((200, 200, 3), np.uint8)
     out = draw_marker_overlay(frame, [])
     assert np.array_equal(out, frame)
+
+
+# ---------------------------------------------------------------------------
+# Finding 3 (promovido, ronda 1 de revision): el mapeo de color de
+# draw_marker_overlay es la UNICA expresion en la interfaz del estado
+# DEGRADED que spec S7 etapa 2 exige mostrar, y no tenia ninguna
+# aseveracion sobre que color se elige para 4 / 3 / menos marcadores.
+# Se comprueba el color de verdad presente en los pixeles dibujados (los
+# contornos de cv2.polylines son de color solido, sin anti-aliasing) --
+# no es OCR, es una comparacion de color exacta.
+# ---------------------------------------------------------------------------
+
+_COLOR_GREEN_OK = (60, 200, 60)
+_COLOR_ORANGE_DEGRADED = (0, 165, 255)
+_COLOR_RED_BLOCKED = (40, 40, 230)
+
+
+def _has_pixel_of_color(image: np.ndarray, color: tuple[int, int, int]) -> bool:
+    return bool(np.any(np.all(image == np.array(color, dtype=image.dtype), axis=-1)))
+
+
+def test_draw_marker_overlay_colors_green_with_all_four_markers():
+    frame = np.zeros((200, 200, 3), np.uint8)
+    detections = [_marker(i, 30 + 40 * i, 30 + 40 * i) for i in range(1, 5)]
+    out = draw_marker_overlay(frame, detections)
+    assert _has_pixel_of_color(out, _COLOR_GREEN_OK)
+    assert not _has_pixel_of_color(out, _COLOR_ORANGE_DEGRADED)
+    assert not _has_pixel_of_color(out, _COLOR_RED_BLOCKED)
+
+
+def test_draw_marker_overlay_colors_orange_with_exactly_three_markers():
+    frame = np.zeros((200, 200, 3), np.uint8)
+    detections = [_marker(i, 30 + 40 * i, 30 + 40 * i) for i in range(1, 4)]
+    out = draw_marker_overlay(frame, detections)
+    assert _has_pixel_of_color(out, _COLOR_ORANGE_DEGRADED)
+    assert not _has_pixel_of_color(out, _COLOR_GREEN_OK)
+    assert not _has_pixel_of_color(out, _COLOR_RED_BLOCKED)
+
+
+def test_draw_marker_overlay_colors_red_with_fewer_than_three_markers():
+    frame = np.zeros((200, 200, 3), np.uint8)
+    detections = [_marker(1, 50, 50), _marker(2, 100, 100)]
+    out = draw_marker_overlay(frame, detections)
+    assert _has_pixel_of_color(out, _COLOR_RED_BLOCKED)
+    assert not _has_pixel_of_color(out, _COLOR_GREEN_OK)
+    assert not _has_pixel_of_color(out, _COLOR_ORANGE_DEGRADED)

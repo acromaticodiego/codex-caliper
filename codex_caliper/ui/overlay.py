@@ -25,11 +25,18 @@ mide exactamente esto -- a 0.2 mm/px una ambiguedad de borde de 1 px son
 propio lienzo, sin importar cuanto se asiente la dispersion temporal.
 
 ``format_measurement(value_mm, std_mm, floor_mm=_CANVAS_MM_PER_PX)`` aplica
-el piso como PRIMER paso, incondicionalmente, antes de decidir decimales.
-El parametro tiene un default (la escala fija del lienzo del rig, S5.1) para
-que un caller que lo olvide siga protegido -- el piso no depende de que
-alguien se acuerde de pasarlo. ``draw_results`` si pasa el ``mm_per_px``
-real de cada frame explicitamente, porque esa es la escala verdadera de ESA
+el piso como PRIMER paso, incondicionalmente, antes de decidir decimales --
+y lo hace DENTRO de ``_round_to_one_sig_fig``, la primitiva, no en esta
+funcion (ronda 1 de revision: el piso vivia una capa por encima, asi que
+cualquier otro llamador interno futuro de la primitiva quedaba sin
+proteccion). El parametro tiene un default (la escala fija del lienzo del
+rig, S5.1) para que un caller que lo OLVIDE siga protegido. Un caller que
+pase un ``floor_mm`` explicito invalido (<= 0, que solo puede llegar por un
+defecto aguas arriba) no queda "protegido" en silencio con el default: la
+primitiva lanza ``ValueError`` -- ensanchar un piso roto a 0.2 mm mentiria
+hacia arriba en un montaje con lienzo mas fino (ver docstring de
+``_round_to_one_sig_fig``). ``draw_results`` si pasa el ``mm_per_px`` real
+de cada frame explicitamente, porque esa es la escala verdadera de ESA
 calibracion y puede ser mas fina que el default si el montaje cambia.
 """
 
@@ -58,6 +65,19 @@ _LABEL_MARGIN_PX = 10
 #: Alto de linea del bloque de texto, en pixeles, a la escala de fuente
 #: fija de este modulo (``_FONT_SCALE``).
 _LINE_HEIGHT_PX = 18
+
+#: Ancho presupuestado, en pixeles, para cualquier linea que este modulo
+#: dibuje a su fuente fija (ronda 1 de revision, Finding 2). No se mide
+#: con ``cv2.getTextSize`` por cada render -- eso acoplaria el ancla al
+#: contenido exacto del texto -- se reserva un presupuesto generoso una
+#: sola vez, igual que ``_LINE_HEIGHT_PX`` ya hace con el alto. La linea
+#: mas larga real ("CAL 999.9 +/- 99.9 mm") cabe con margen de sobra.
+_LABEL_BLOCK_WIDTH_PX = 220
+
+#: Lineas maximas que ``compose_label_lines`` puede devolver (veredicto,
+#: L, CAL, peso -- el mockup completo de S8). Solo se usa para reservar
+#: espacio VERTICAL al anclar (Finding 2); no decide que se muestra.
+_LABEL_MAX_LINES = 4
 
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 _FONT_SCALE = 0.5
@@ -91,29 +111,59 @@ def format_measurement(value_mm: float, std_mm: float, floor_mm: float = _CANVAS
     incertidumbre redondeada -- no al reves, y no por una cadena de
     umbrales ad hoc. A 0.82 mm de incertidumbre (redondea a 0.8, un
     decimal) el valor se imprime con un decimal; a 5.0 mm (redondea a 5,
-    cero decimales) el valor se imprime entero. Por debajo de ``floor_mm``
-    la incertidumbre se recorta al piso ANTES de este calculo (ver
-    docstring del modulo): es la unica forma de que una desviacion de
-    0.0 exacta -- el primer frame de cada track, Ruling 2 -- no produzca
-    precision infinita.
+    cero decimales) el valor se imprime entero.
+
+    El piso de incertidumbre (Ruling 2) se aplica dentro de
+    ``_round_to_one_sig_fig``, no aqui -- ver esa funcion para el porque
+    (ronda 1 de revision: el piso vivia en esta funcion y cualquier otro
+    llamador interno futuro de la primitiva quedaba sin proteccion).
     """
-    std_effective = max(std_mm, floor_mm)
-    std_rounded, decimals = _round_to_one_sig_fig(std_effective)
+    std_rounded, decimals = _round_to_one_sig_fig(std_mm, floor_mm)
     return f"{value_mm:.{decimals}f} ± {std_rounded:.{decimals}f} mm"
 
 
-def _round_to_one_sig_fig(std_mm: float) -> tuple[float, int]:
-    """Redondea ``std_mm`` a 1 cifra significativa y devuelve (redondeado, decimales).
+def _round_to_one_sig_fig(std_mm: float, floor_mm: float) -> tuple[float, int]:
+    """Aplica el piso de incertidumbre y redondea a 1 cifra significativa.
 
-    ``decimals`` es cuantos decimales hacen falta para representar
-    EXACTAMENTE el valor ya redondeado -- no el original, porque redondear
-    puede subir un orden de magnitud (0.96 -> 1.0) y los decimales tienen
-    que seguir al resultado, no al punto de partida.
+    Devuelve ``(redondeado, decimales)``. ``decimales`` es cuantos
+    decimales hacen falta para representar EXACTAMENTE el valor ya
+    redondeado -- no el original, porque redondear puede subir un orden
+    de magnitud (0.96 -> 1.0) y los decimales tienen que seguir al
+    resultado, no al punto de partida.
+
+    El piso se aplica AQUI, como primer paso, DENTRO de la primitiva --
+    no en una capa por encima (ronda 1 de revision). ``format_measurement``
+    es hoy el unico llamador, pero la proteccion no depende de que siga
+    siendolo: cualquier llamador interno futuro de esta funcion la hereda
+    sin tener que acordarse de aplicarla el mismo.
+
+    ``floor_mm`` tiene que ser una escala fisica POSITIVA -- el mm/px de
+    la calibracion de ESE frame (Ruling 2), no un limite absoluto del
+    proyecto. La revision de la ronda 1 propuso clavarlo a
+    ``max(floor_mm, _CANVAS_MM_PER_PX)``; se rechaza a proposito: un
+    montaje con un lienzo mas fino (S5.1 llega a ~0.07 mm/px con otra
+    focal) tiene derecho a reportar esa resolucion mas fina, y forzar un
+    piso de 0.2 mm por encima de lo que pide el caller mentiria HACIA
+    ARRIBA -- el anti-objetivo de falsa precision (S4) corre en ambas
+    direcciones, no solo "menos decimales de los que hacen falta".
+
+    Lo que SI hay que rechazar no es un piso fino, es un piso que no es
+    un piso en absoluto: ``floor_mm <= 0`` solo puede llegar por un
+    defecto aguas arriba (p.ej. un ``mm_per_px`` de calibracion en 0.0 por
+    un fallo de ``compute_plane_calibration``), y este proyecto ya tiene
+    la convencion de dejar propagar ese tipo de error en vez de
+    enmascararlo con un valor por defecto silencioso (``pipeline.py``
+    deja propagar ``DegenerateMarkerLayout`` por la misma razon: un error
+    de programacion aguas arriba tiene que verse). Por eso se lanza
+    ``ValueError`` en vez de reinterpretar un piso roto como "usa 0.2
+    entonces" -- una excepcion ruidosa aqui es preferible a una cifra con
+    precision falsa que se ve bien en pantalla.
     """
-    if std_mm <= 0:
-        return 0.0, 0
-    exponent = math.floor(math.log10(std_mm))
-    rounded = round(std_mm, -exponent)
+    if floor_mm <= 0:
+        raise ValueError(f"floor_mm debe ser una escala fisica positiva (mm/px); llego {floor_mm!r}")
+    std_effective = max(std_mm, floor_mm)
+    exponent = math.floor(math.log10(std_effective))
+    rounded = round(std_effective, -exponent)
     if rounded > 0:
         exponent = math.floor(math.log10(rounded))
     decimals = max(0, -exponent)
@@ -125,12 +175,39 @@ def text_anchor_for(mask: np.ndarray) -> tuple[int, int]:
 
     No existe bbox en ``BananaResult`` (Ruling 1: el pipeline no lo
     propaga a proposito, ver Task 14). Se deriva directamente de la
-    extension real de la mascara booleana: la esquina superior derecha de
-    su caja delimitadora, mas un margen fijo para no superponerse al
-    contorno del fruto. Al moverse la mascara el ancla se traslada con
-    ella exactamente lo mismo -- es la propiedad que hace que "los numeros
-    sigan al objeto" (spec S8) sea cierto y no solo un efecto visual
-    casual.
+    extension real de la mascara booleana: por defecto, la esquina
+    superior derecha de su caja delimitadora, mas un margen fijo para no
+    superponerse al contorno del fruto.
+
+    Recorte a los limites del lienzo (Finding 2, ronda 1 de revision)
+    --------------------------------------------------------------------
+    ``mask.shape`` ES la forma del lienzo rectificado (misma forma que
+    ``canvas`` -- ver docstring de ``BananaResult.mask`` en
+    ``pipeline.py``), asi que esta funcion ya tiene todo lo que necesita
+    para no anclar fuera de el; no hace falta un parametro de lienzo
+    aparte. Sin este recorte, un banano que una mano mueve hasta el borde
+    del frame -- exactamente el momento que spec S13 vende como la
+    publicacion del proyecto -- produce un ancla fuera de
+    ``canvas.shape``; ``cv2.putText`` no lanza ahi, solo recorta en
+    silencio, y la etiqueta entera desaparece justo cuando mas se esta
+    mirando el video.
+
+    Si el bloque no cabe a la derecha de la mascara, se VOLTEA al otro
+    lado (se ancla a la izquierda del borde izquierdo de la mascara) en
+    vez de limitarse a recortar contra el borde del lienzo -- asi el
+    ancla sigue derivada de la extension de ESTA mascara (Ruling 4),
+    nunca de un punto fijo del lienzo que no tenga relacion con donde
+    esta el banano. El mismo recorte, sin volteo, se aplica en Y contra
+    el borde inferior (no hay "arriba" y "abajo" del banano que tenga
+    sentido voltear ahi; subir el bloque es suficiente). Si ni el volteo
+    alcanza (lienzo mas angosto que el bloque -- no esperado en el rig
+    real, solo en fixtures de prueba sinteticos) se recorta a
+    ``[0, canvas_w - block_w]`` como ultimo recurso.
+
+    Al moverse la mascara el ancla se traslada con ella exactamente lo
+    mismo, salvo que el recorte de borde intervenga -- es la propiedad
+    que hace que "los numeros sigan al objeto" (spec S8) sea cierto y no
+    solo un efecto visual casual.
 
     Precondicion: ``mask`` tiene al menos un pixel en ``True``. El
     pipeline nunca produce un ``BananaResult`` con una mascara vacia
@@ -141,8 +218,20 @@ def text_anchor_for(mask: np.ndarray) -> tuple[int, int]:
     """
     ys, xs = np.nonzero(mask)
     x_max = int(xs.max())
+    x_min = int(xs.min())
     y_min = int(ys.min())
-    return x_max + _LABEL_MARGIN_PX, y_min + _LABEL_MARGIN_PX
+    canvas_h, canvas_w = mask.shape[:2]
+
+    x = x_max + _LABEL_MARGIN_PX
+    if x + _LABEL_BLOCK_WIDTH_PX > canvas_w:
+        x = x_min - _LABEL_MARGIN_PX - _LABEL_BLOCK_WIDTH_PX
+    x = max(0, min(x, max(0, canvas_w - _LABEL_BLOCK_WIDTH_PX)))
+
+    block_h = _LABEL_MAX_LINES * _LINE_HEIGHT_PX
+    y = y_min + _LABEL_MARGIN_PX
+    y = max(0, min(y, max(0, canvas_h - block_h)))
+
+    return x, y
 
 
 def _progress_bar(samples: int, window: int = TEMPORAL_WINDOW, segments: int = 4) -> str:
