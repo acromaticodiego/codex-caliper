@@ -68,18 +68,34 @@ Correcciones de la ronda 1 de revision
 
 from __future__ import annotations
 
+import tempfile
+import uuid
+from pathlib import Path
+
 import numpy as np
 from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QMainWindow, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from codex_caliper.aruco_tools import CalibrationState
 from codex_caliper.camera import CameraThread
+from codex_caliper.config import AppConfig
 from codex_caliper.intrinsics import Intrinsics, IntrinsicsMismatch
 from codex_caliper.pipeline import MARKER_COUNT, FrameResult, Pipeline
+from codex_caliper.ui.calibration_view import IntrinsicCalibrationView, PlaneCalibrationView
 from codex_caliper.ui.overlay import draw_results
 from codex_caliper.ui.side_panel import SidePanel
+from codex_caliper.ui.validation_view import ValidationView
 from codex_caliper.ui.video_view import VideoView
+from codex_caliper.validation import ValidationLog
 
 # Paleta: instrumento de medicion, no tablero SaaS -- mismos tokens que
 # ``video_view.py``/``side_panel.py``. Ver el informe de la tarea para la
@@ -101,6 +117,21 @@ _CHECK = "✓"  # ✓ -- Qt renderiza Unicode real, a diferencia de cv2.putText 
 _CROSS = "✗"  # ✗
 _WARN = "⚠"  # ⚠
 _SEPARATOR = " │ "  # │ -- la forma exacta del mockup de la spec S8
+
+_NAV_BAR_HEIGHT_PX = 36
+
+#: Nombres de pagina validos para ``show_view``/``current_view_name`` (Task
+#: 19: navegacion entre la operacion en vivo y las vistas de calibracion/
+#: validacion, spec S8 -- pantallas SEPARADAS, nunca compitiendo por
+#: espacio con el video). El orden de esta lista es el orden de los
+#: botones de la barra de navegacion.
+_VIEW_NAMES = ["live", "intrinsic_calibration", "plane_calibration", "validation"]
+_VIEW_LABELS = {
+    "live": "Live",
+    "intrinsic_calibration": "Calibrate camera",
+    "plane_calibration": "Calibrate plane",
+    "validation": "Validation",
+}
 
 
 class _PipelineWorker(QObject):
@@ -129,7 +160,12 @@ class _PipelineWorker(QObject):
 
 
 class MainWindow(QMainWindow):
-    """Ventana principal: barra de estado, video central, panel a la derecha.
+    """Ventana principal: barra de navegacion, y debajo la pagina activa de
+    un ``QStackedWidget`` -- la operacion en vivo (barra de estado, video
+    central, panel) mas las tres vistas de esta tarea (spec S8: las
+    pantallas de calibracion y de validacion son SEPARADAS, no compiten
+    por espacio con el video en vivo, que sigue siendo la unica pagina que
+    tiene que ganarse pixel a pixel contra el panel de 240 px).
 
     ``pipeline`` es opcional a proposito: las pruebas de layout de esta
     tarea no necesitan medir nada, solo alimentar ``update_frame_result``
@@ -137,6 +173,17 @@ class MainWindow(QMainWindow):
     ``pipeline`` real, ``submit_frame``/``connect_camera`` quedan listos
     para que la Task 20 (el punto de entrada) conecte una camara real sin
     tener que resolver otra vez el hilo de procesamiento.
+
+    ``cfg``/``validation_log_path`` son OPCIONALES: ``MainWindow()`` sin
+    argumentos (como construyen todas las pruebas de layout de la Task 18)
+    sigue funcionando sin tocar disco ni exigir un montaje real -- sin
+    ``cfg`` se usa un ``AppConfig`` placeholder (ningun test de esta tarea
+    detecta marcadores a traves de el sin pasar un ``cfg`` explicito), y
+    sin ``validation_log_path`` el log de validacion queda en un archivo
+    temporal con un nombre unico por instancia (nunca se CREA hasta el
+    primer ``record_sample`` real, asi que una ventana construida sin
+    validar nada no deja ningun rastro en disco). Task 20 pasara los dos
+    reales.
     """
 
     _frame_submitted = Signal(np.ndarray)
@@ -145,6 +192,8 @@ class MainWindow(QMainWindow):
         self,
         intrinsics: Intrinsics | None = None,
         pipeline: Pipeline | None = None,
+        cfg: AppConfig | None = None,
+        validation_log_path: str | Path | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -160,6 +209,7 @@ class MainWindow(QMainWindow):
         self._worker: _PipelineWorker | None = None
         self._status_text = ""
         self._status_warning = False
+        self._cfg = cfg if cfg is not None else AppConfig(marker_thickness_mm=0.0)
 
         self.video_view = VideoView()
         self.side_panel = SidePanel()
@@ -192,7 +242,63 @@ class MainWindow(QMainWindow):
         outer_layout.setSpacing(0)
         outer_layout.addWidget(status_bar_widget)
         outer_layout.addWidget(content, 1)
-        self.setCentralWidget(outer)
+
+        # -- Navegacion entre vistas (Task 19, spec S8) -----------------------
+        #
+        # ``outer`` (la pagina de operacion en vivo de arriba, sin cambios)
+        # pasa a ser la pagina "live" de un ``QStackedWidget``; las otras
+        # tres paginas son las vistas de calibracion/validacion de esta
+        # tarea. Solo una pagina es visible a la vez -- eso es, literalmente,
+        # "pantalla separada, no compite por espacio" (spec S8): no un panel
+        # lateral mas, una vista entera distinta.
+        self.intrinsic_calibration_view = IntrinsicCalibrationView()
+        self.plane_calibration_view = PlaneCalibrationView(self._cfg)
+        if validation_log_path is None:
+            # Unico por instancia y NUNCA creado hasta el primer
+            # ``record_sample`` real (``ValidationLog.__init__`` solo LEE si
+            # el archivo ya existe) -- una ``MainWindow`` construida sin un
+            # log real (todas las pruebas de layout de la Task 18, y la
+            # mayoria de las de esta tarea) no deja ningun rastro en disco.
+            validation_log_path = Path(tempfile.gettempdir()) / f"codex_caliper_validation_{uuid.uuid4().hex}.csv"
+        self.validation_view = ValidationView(ValidationLog(validation_log_path))
+
+        # La vista de calibracion intrinseca desbloquea la medicion a
+        # traves de la MISMA compuerta que ya construyo la Task 18
+        # (``load_intrinsics``/``measurement_enabled``) -- Ruling 3 del
+        # encargo: esta ventana no reimplementa esa logica, solo la conecta.
+        self.intrinsic_calibration_view.calibration_accepted.connect(self.load_intrinsics)
+
+        self._stack = QStackedWidget()
+        self._stack.addWidget(outer)
+        self._stack.addWidget(self.intrinsic_calibration_view)
+        self._stack.addWidget(self.plane_calibration_view)
+        self._stack.addWidget(self.validation_view)
+
+        self._nav_buttons: dict[str, QPushButton] = {}
+        nav_bar = QWidget()
+        nav_bar.setFixedHeight(_NAV_BAR_HEIGHT_PX)
+        nav_bar.setStyleSheet(f"background-color: {_SURFACE_HEX}; border-bottom: 1px solid {_RULE_HEX};")
+        nav_layout = QHBoxLayout(nav_bar)
+        nav_layout.setContentsMargins(8, 0, 8, 0)
+        nav_layout.setSpacing(4)
+        for name in _VIEW_NAMES:
+            button = QPushButton(_VIEW_LABELS[name])
+            button.setCheckable(True)
+            button.setFlat(True)
+            button.clicked.connect(lambda _checked=False, n=name: self.show_view(n))
+            self._nav_buttons[name] = button
+            nav_layout.addWidget(button)
+        nav_layout.addStretch(1)
+
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(nav_bar)
+        central_layout.addWidget(self._stack, 1)
+        self.setCentralWidget(central)
+
+        self.show_view("live")
 
         if pipeline is not None:
             self._worker_thread = QThread(self)
@@ -207,6 +313,24 @@ class MainWindow(QMainWindow):
             self._worker.result_ready.connect(self.update_frame_result)
 
         self._refresh_status()
+
+    # -- Navegacion entre vistas (Task 19, spec S8) --------------------------
+
+    def show_view(self, name: str) -> None:
+        """Muestra la pagina ``name`` (``"live"``, ``"intrinsic_calibration"``,
+        ``"plane_calibration"`` o ``"validation"``) y nada mas: cambiar de
+        pagina no pausa ni reinicia la camara ni el pipeline -- siguen
+        corriendo si estan conectados, exactamente como un operador
+        esperaria de pestanas, no de pantallas modales."""
+        if name not in _VIEW_NAMES:
+            raise ValueError(f"unknown view {name!r}; expected one of {_VIEW_NAMES}")
+        self._stack.setCurrentIndex(_VIEW_NAMES.index(name))
+        for button_name, button in self._nav_buttons.items():
+            button.setChecked(button_name == name)
+
+    def current_view_name(self) -> str:
+        """El nombre de la pagina actualmente visible."""
+        return _VIEW_NAMES[self._stack.currentIndex()]
 
     # -- Entrada de cuadros ------------------------------------------------
 

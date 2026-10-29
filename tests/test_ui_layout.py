@@ -260,6 +260,34 @@ def test_blocked_calibration_is_a_warning_but_healthy_calibration_is_not(qtbot):
     assert window.status_is_warning() is False
 
 
+def test_status_bar_shows_degraded_markers_as_a_warning_with_three_markers(qtbot):
+    """Carry-over de la Task 18 (Ruling 4 de esta tarea): el brief original
+    y todas las pruebas de ``_plane(...)`` en este archivo solo ejercitan
+    ``CalibrationState.OK`` -- la rama DEGRADED (3/4 marcadores) de
+    ``_markers_segment`` nunca corrio bajo una prueba, a pesar de ser la
+    rama que spec S7 etapa 2 nombra explicitamente ("con 3 marcadores el
+    sistema sigue funcionando y lo indica")."""
+    window = MainWindow(intrinsics=_intrinsics())
+    qtbot.addWidget(window)
+
+    window.update_frame_result(
+        _frame_result(
+            rectified=_frame(900, 600),
+            plane=_plane(state=CalibrationState.DEGRADED),
+            warnings=["Degraded calibration: 3/4 ArUco markers visible..."],
+        )
+    )
+
+    assert f"3/{MARKER_COUNT} markers" in window.status_text()
+    assert window.status_is_warning() is True
+
+    # Y el lado sano sigue sin avisar -- la misma distincion que la Ruling 1
+    # ya exigio para el caso bloqueado/sano (no "avisa siempre").
+    window.update_frame_result(_frame_result(rectified=_frame(900, 600), plane=_plane()))
+    assert f"{MARKER_COUNT}/{MARKER_COUNT} markers" in window.status_text()
+    assert window.status_is_warning() is False
+
+
 def test_side_panel_does_not_leave_stale_cards_visible_after_an_update(qtbot):
     """Encontrado revisando una captura de pantalla, no un conteo: ``takeAt``
     saca un widget de la CONTABILIDAD del layout, pero sigue siendo un hijo
