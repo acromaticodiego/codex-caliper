@@ -68,7 +68,7 @@ What to install next depends on what you want to do:
 | You want to | Install |
 |---|---|
 | Read the code | `.venv/Scripts/python.exe -m pip install -e .` |
-| Run the tests (262 of them) | `.venv/Scripts/python.exe -m pip install -e ".[dev]"` |
+| Run the tests | `.venv/Scripts/python.exe -m pip install -e ".[dev]"` |
 | Run it live against the rig | `.venv/Scripts/python.exe -m pip install -e ".[dev,live]"` |
 
 The base install (`opencv-python`, `numpy`, `scipy`, `scikit-image`, `PySide6`, `pandas`)
@@ -264,8 +264,9 @@ depending on where you put it*, and the error cannot be attributed to anything i
 algorithm.
 
 **10 — Run it.** `.venv/Scripts/python.exe -m codex_caliper`. The status bar shows the
-intrinsics RMS, the marker count, and the live scale in mm/px. Measurement stays blocked
-until all three are healthy.
+intrinsics RMS, the marker count, and the homography's reprojection residual in mm (measured
+every frame — not the canvas scale, which is a config constant and cannot indicate health).
+Measurement stays blocked until all three are healthy.
 
 ## Accuracy
 
@@ -325,12 +326,15 @@ where an error came from:
 validation view regresses real weight against computed volume through the origin; the slope
 *is* the system's effective density, and the R² of that regression is a publishable result.
 At least 10 samples are required before a fitted slope is reported — below that it is noise
-with pretensions.
+with pretensions. That fitted slope is reported *in the validation screen only* — see "Known
+limits" for why the live weight estimate stays unavailable regardless.
 
 The validation log also carries a hand-measured length column, and it is not optional
 decoration: the scale cannot detect a pedicel-trim error at all. Weighing a banana says
-nothing about where its stalk was cut. Samples are appended to `validation_log.csv`, next
-to your config file.
+nothing about where its stalk was cut. Each sample is written to `validation_log.csv`, next
+to your config file, by `ValidationLog.record` — but see "Known limits": in this version
+nothing in the running app calls it, so no row actually reaches that file through normal
+operation yet.
 
 ## Known limits
 
@@ -392,6 +396,35 @@ Said out loud, with numbers, because hiding them would cost more credibility tha
   sees moving at 30 fps is the warp and the overlay; the measurement settles over a 30-frame
   temporal window regardless.
 
+- **The "Calibrate plane" and "Validation" screens are display-only in this version — neither
+  can be driven from the running app.** `PlaneCalibrationView.update_frame` detects markers,
+  fits the homography and draws the overlay correctly, and `ValidationView.record_sample`
+  writes a correctly-shaped, correctly-adjusted row to the CSV — both have their own tests —
+  but nothing in `main_window.py` ever calls either. No camera frame reaches the plane screen,
+  and the validation screen has no input widget at all: there is no way to type in a scale
+  reading or a tape measurement and get a row recorded through the app. Wiring both (a camera
+  feed into the first, weight/length entry fields into the second) is new feature work, not a
+  bug fix, and is out of scope for this round. Until then, both screens are evidence that the
+  underlying logic works, not an operable instrument.
+
+- **The estimated weight line never renders, because nothing fits a density for the live
+  pipeline.** `Pipeline` accepts an optional `density_g_per_cm3` and multiplies it by volume to
+  produce `estimated_weight_g`, but the entry point never passes one, so it stays `None` and
+  the weight line of the S8 mockup simply does not appear. `ValidationView` *does* fit a
+  density from recorded samples (see *Validation protocol* above) — but only to show it in its
+  own summary; no code path takes that fitted value and hands it back to the live `Pipeline`.
+  Closing this needs the validation screen wired first (the point above), plus a decision
+  about which fit a live session should use and when to refresh it.
+
+- **YOLO inference resizes to a square, which does not preserve aspect ratio.** `BananaDetector`
+  resizes every frame to `infer_size × infer_size` (640 × 640 by default) with a plain
+  `cv2.resize`, no letterboxing. A landscape camera frame (this rig is 1920 × 1080) is squashed
+  horizontally before the network ever sees it, which the mask-rescaling step later undoes
+  geometrically but cannot undo for whatever the distortion already cost detection accuracy.
+  This was deferred to Task 20 and Task 20 shipped with the default, unaddressed — it is an
+  open, undocumented-until-now accuracy risk on the one job the neural half of this project
+  owns.
+
 Also out of scope in this version, by choice: training a model (COCO-pretrained YOLO is used
 as-is), ripeness classification, surface-defect detection, objects tall relative to the
 270 mm working distance, multi-camera, and production deployment.
@@ -436,16 +469,16 @@ have real numbers behind them.
 .venv/Scripts/python.exe -m pytest
 ```
 
-262 tests, no camera and no `ultralytics` required: every test that touches the camera
-injects a fake `VideoCapture`, and every test that touches the detector injects a fake
-model.
+No camera and no `ultralytics` required: every test that touches the camera injects a fake
+`VideoCapture`, and every test that touches the detector injects a fake model.
 
 A standing rule of this project, learned the hard way: **green tests do not mean the code is
-right.** Eleven tests here turned out to pass equally with correct and with wrong
-implementations — "approximately X %" assertions, and bounds in one direction only. So every
-behaviour a test claims to protect was verified by deliberately breaking the implementation,
-confirming the test went red, and reverting. At one point this project had 75 green tests and
-a −19.4 % area error.
+right.** Thirteen tests here turned out to pass equally with correct and with wrong
+implementations — "approximately X %" assertions, bounds in one direction only, and assertions
+checked before the code under test could possibly have run yet. So every behaviour a test
+claims to protect was verified by deliberately breaking the implementation, confirming the
+test went red, and reverting. At one point this project had 75 green tests and a −19.4 % area
+error.
 
 ## Reference
 

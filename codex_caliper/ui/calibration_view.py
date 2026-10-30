@@ -385,6 +385,13 @@ class PlaneCalibrationView(QWidget):
         self._detections: list[MarkerDetection] = []
         self._plane: PlaneCalibration | None = None
         self._has_frame = False
+        # Inicializado aqui (minor, ronda de correcciones finales): antes
+        # este atributo solo existia desde el primer ``update_frame`` --
+        # ``_update_preview_pixmap`` llamado antes de eso (p.ej. desde un
+        # futuro manejador de resize que reescale la vista previa actual)
+        # levantaria ``AttributeError`` en vez de, simplemente, no tener
+        # nada que dibujar todavia.
+        self.displayed_frame: np.ndarray | None = None
 
         self.setStyleSheet(f"background-color: {BG_VOID_HEX};")
 
@@ -417,7 +424,24 @@ class PlaneCalibrationView(QWidget):
         suficiente geometria, y refresca la vista previa con el mismo
         overlay de marcadores que ``draw_marker_overlay`` (Task 17) ya
         dibuja en la ventana en vivo -- una sola convencion de color para
-        el estado de calibracion, no dos."""
+        el estado de calibracion, no dos.
+
+        ADVERTENCIA para quien cablee esta vista (C3, ronda de correcciones
+        finales): ``Pipeline.process`` detecta marcadores sobre
+        ``raw_undistorted`` (el cuadro YA corregido de distorsion,
+        ``pipeline.py``), nunca sobre el cuadro crudo de camara. Este
+        metodo, en cambio, llama a ``detect_markers`` directamente sobre
+        ``frame`` -- esta vista no recibe ni guarda un ``Intrinsics`` y no
+        tiene con que corregir distorsion. Nadie llama a ``update_frame``
+        hoy (ver "Known limits" del README: esta pantalla es solo
+        visualizacion en esta version), asi que el hueco es inofensivo tal
+        cual esta. Pero si alguien la cablea a una camara real sin
+        resolver esto primero, ``self._plane.residual_mm`` saldria
+        calculado sobre pixeles TODAVIA distorsionados -- un residual que
+        parece una medida de calidad de calibracion y en realidad mezcla
+        esa calidad con la distorsion de la lente sin corregir, publicando
+        un numero peor de lo que la calibracion real produce.
+        """
         self._has_frame = True
         self._detections = detect_markers(frame, self._cfg)
         self._plane = compute_plane_calibration(self._detections, self._cfg)
