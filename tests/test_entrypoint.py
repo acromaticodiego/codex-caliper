@@ -342,6 +342,39 @@ def test_main_reports_a_clear_error_when_the_camera_driver_raises(tmp_path, caps
     assert "Traceback" not in err
 
 
+def test_build_detector_passes_every_n_frames_from_config(monkeypatch):
+    """Residuo del hallazgo critico C1: ``AppConfig`` ganaba ``every_n_frames``
+    pero ``_build_detector`` no lo recibia, asi que ``BananaDetector()`` se
+    construia sin argumentos y la cadencia de inferencia de
+    ``config/app.json`` no tenia ningun efecto -- un campo que nada leia.
+
+    La implementacion equivocada que esta prueba RECHAZA es exactamente esa:
+    ``_build_detector`` llamando ``BananaDetector()`` a secas (cadencia
+    hardcodeada al default, 1) o incluso leyendo el campo pero
+    descartandolo. Por eso se configura una cadencia DISTINTA del default
+    (7) y se afirma que el detector construido la recibio -- afirmar solo
+    que "un detector existe" la deja pasar igual con las dos
+    implementaciones rotas.
+
+    Se inyecta una clase falsa en vez de ``BananaDetector`` real para no
+    depender de ``ultralytics`` (no instalado en este entorno): lo que se
+    prueba es el cableado de ``_build_detector``, no el constructor de
+    ``BananaDetector`` (eso ya lo cubre ``test_detection.py``).
+    """
+    captured_kwargs: dict = {}
+
+    class _RecordingDetector:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(entrypoint, "BananaDetector", _RecordingDetector)
+    cfg = AppConfig(marker_thickness_mm=2.5, every_n_frames=7)
+
+    entrypoint._build_detector(cfg)
+
+    assert captured_kwargs.get("every_n_frames") == 7
+
+
 def test_main_reports_a_clear_error_when_ultralytics_is_not_installed(
     tmp_path, capsys, monkeypatch
 ):
@@ -406,7 +439,7 @@ def test_main_reports_a_clear_error_when_the_validation_log_is_unparseable(
     """
     cfg_path = _write_valid_config(tmp_path)
     intrinsics_path = _write_valid_intrinsics(tmp_path)
-    monkeypatch.setattr(entrypoint, "_build_detector", lambda: object())
+    monkeypatch.setattr(entrypoint, "_build_detector", lambda cfg: object())
 
     # El log de validacion vive junto a la config (``VALIDATION_LOG_NAME``,
     # ver el docstring del modulo) -- se mangla ahi.

@@ -267,7 +267,7 @@ def compose_label_lines(result: BananaResult, mm_per_px: float) -> list[str]:
     podria alternar pass/fail frame a frame con la interfaz mostrando
     numeros como si fueran definitivos. Una vez ``locked`` ocurre lo
     opuesto: la barra de progreso desaparece (ya no esta "progresando",
-    esta fija) y aparecen el veredicto, L, qalibre y peso, en ese orden --
+    esta fija) y aparecen el veredicto, L, calibre y peso, en ese orden --
     el orden del mockup de la spec.
     """
     aggregate = result.aggregate

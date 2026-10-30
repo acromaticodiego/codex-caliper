@@ -210,7 +210,7 @@ def probe_camera(index: int, *, open_capture=camera.open_capture) -> str | None:
     return None
 
 
-def _build_detector() -> BananaDetector:
+def _build_detector(cfg: AppConfig) -> BananaDetector:
     """Construye el detector YOLO, traduciendo la falta de ``ultralytics``.
 
     El import de ``ultralytics`` es PEREZOSO (Task 12): vive dentro de la
@@ -220,9 +220,14 @@ def _build_detector() -> BananaDetector:
     no se nota al importar nada, sino al arrancar el sistema -- en el rig,
     con todo ya montado. Sin esta traduccion llegaria como ``ImportError``
     crudo; con ella, como una linea que dice que instalar.
+
+    ``cfg.every_n_frames`` se pasa tal cual (residuo de la ronda final de
+    fixes, C1): sin esto, ``BananaDetector()`` siempre usaba su default de
+    1 y la cadencia de inferencia de ``config/app.json`` no tenia ningun
+    efecto -- la config declaraba un campo que nada leia.
     """
     try:
-        return BananaDetector()
+        return BananaDetector(every_n_frames=cfg.every_n_frames)
     except ImportError as exc:
         raise _StartupError(
             f"the YOLO backend is unavailable: {exc}. Install it with "
@@ -340,7 +345,7 @@ def main(argv: list[str] | None = None, *, open_capture=camera.open_capture) -> 
         if camera_error is not None:
             raise _StartupError(camera_error)
 
-        detector = _build_detector()
+        detector = _build_detector(cfg)
         pipeline = Pipeline(cfg, intrinsics, detector)
 
         # La CONSTRUCCION de la ventana entra aqui, dentro del mismo guard

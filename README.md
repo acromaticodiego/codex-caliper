@@ -207,6 +207,7 @@ config:
   "temporal_window": 30,
   "pedicel_drop_ratio": 0.45,
   "border_margin_px": 2,
+  "every_n_frames": 1,
   "aruco_dictionary": "DICT_6X6_50",
   "marker_ids": [1, 2, 3, 4],
   "marker_layout": {
@@ -394,7 +395,10 @@ Said out loud, with numbers, because hiding them would cost more credibility tha
 - **Measurement does not run at 30 fps, and does not need to.** `medial_axis_path` alone
   costs ~11 ms per banana, which is the entire per-banana budget at 30 fps. What the viewer
   sees moving at 30 fps is the warp and the overlay; the measurement settles over a 30-frame
-  temporal window regardless.
+  temporal window regardless. `every_n_frames` in the config lets a slower, CPU-only machine
+  run YOLO every Nth frame and reuse the previous detections in between — the objects are
+  stationary, so nothing is lost; with the one-frame-in-flight backpressure already in place
+  this is a tuning knob for CPU cost, not a safeguard against an unbounded queue.
 
 - **The "Calibrate plane" and "Validation" screens are display-only in this version — neither
   can be driven from the running app.** `PlaneCalibrationView.update_frame` detects markers,

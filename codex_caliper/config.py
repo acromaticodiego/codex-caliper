@@ -2,8 +2,9 @@
 
 ``AppConfig`` es el dataclass que leen todas las tareas posteriores: medidas
 fisicas del montaje (marcador, distancia de trabajo), parametros de
-procesamiento (ventana temporal, margenes) y la identidad de los marcadores
-ArUco usados para la calibracion metrica (diccionario, ids, layout).
+procesamiento (ventana temporal, margenes, cadencia de inferencia) y la
+identidad de los marcadores ArUco usados para la calibracion metrica
+(diccionario, ids, layout).
 """
 
 from __future__ import annotations
@@ -76,6 +77,15 @@ class AppConfig:
     aruco_dictionary: str = "DICT_6X6_50"
     marker_ids: list[int] = dataclasses.field(default_factory=lambda: [1, 2, 3, 4])
     marker_layout: dict[int, tuple[float, float]] = dataclasses.field(default_factory=dict)
+    #: Cadencia de inferencia YOLO (``BananaDetector.every_n_frames``): se
+    #: infiere 1 de cada N frames y se reutiliza la ultima deteccion en los
+    #: demas, porque los bananos del rig estan quietos. El default (1)
+    #: preserva el comportamiento de siempre -- inferir en cada frame. Con
+    #: el backpressure de un frame en vuelo ya instalado (``MainWindow``),
+    #: esto YA NO evita una cola que crece sin limite -- esa carga ya esta
+    #: acotada -- es una perilla para bajar el costo de CPU en una maquina
+    #: lenta, no la salvaguarda que era antes de ese cambio.
+    every_n_frames: int = 1
 
     @property
     def effective_height_mm(self) -> float:
