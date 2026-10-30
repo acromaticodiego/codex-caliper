@@ -13,6 +13,48 @@ import json
 from pathlib import Path
 
 
+#: Cantidad de coordenadas que describen la posicion de un marcador: (x, y)
+#: en milimetros sobre el plano del lienzo. El layout es PLANO por
+#: definicion (spec S5): una tercera coordenada no seria una posicion mas
+#: precisa, seria otro modelo de montaje.
+_LAYOUT_COORDINATES = 2
+
+
+def _layout_entry(key: object, value: object) -> tuple[float, float]:
+    """Valida UNA entrada de ``marker_layout`` y la devuelve como ``(x, y)``.
+
+    Una entrada valida es una secuencia de exactamente dos numeros. Se
+    rechaza explicitamente ``str`` y ``bytes`` antes de medir su longitud:
+    ``"215,118"`` ES una secuencia de 7 elementos, asi que una comprobacion
+    de longitud por si sola la aceptaria como si fuera una pareja de
+    coordenadas y produciria ``('2', '1')``. Y los ``bool`` se rechazan como
+    numeros porque ``isinstance(True, int)`` es ``True`` en Python: un
+    ``true`` en el JSON se convertiria en la coordenada 1.0 sin decir nada.
+
+    Lanza ``ValueError`` -- el tipo que ``_load_config`` ya atrapa en
+    ``__main__.py`` -- y nombra la clave, que es el dato con el que el
+    operador encuentra la linea que tiene que corregir.
+    """
+    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
+        raise ValueError(
+            f"marker_layout entry {key!r} must be a list of two numbers [x, y] in "
+            f"millimetres, got {type(value).__name__}"
+        )
+    if len(value) != _LAYOUT_COORDINATES:
+        raise ValueError(
+            f"marker_layout entry {key!r} must have exactly {_LAYOUT_COORDINATES} "
+            f"coordinates [x, y], got {len(value)}"
+        )
+    for coordinate in value:
+        if isinstance(coordinate, bool) or not isinstance(coordinate, (int, float)):
+            raise ValueError(
+                f"marker_layout entry {key!r} must contain numbers, got "
+                f"{coordinate!r} ({type(coordinate).__name__})"
+            )
+    x, y = value
+    return float(x), float(y)
+
+
 @dataclasses.dataclass(kw_only=True)
 class AppConfig:
     """Parametros fisicos y de procesamiento del montaje de medicion.
@@ -68,6 +110,20 @@ class AppConfig:
         metodo valida lo que va a indexar y lo convierte en ``ValueError``
         -- que la tupla ya atrapa -- para que "nunca un traceback" se
         cumpla por construccion y no por enumerar tipos de excepcion.
+
+        Se validan las ENTRADAS, no solo los contenedores (ronda de
+        correcciones finales, I6). La ronda anterior comprobaba que la raiz
+        fuera un objeto y que ``marker_layout`` fuera un objeto, y nada mas:
+        ``{"1": {"x": 0, "y": 0}}`` -- el mismo genero de desliz de edicion
+        a mano que los dos casos ya cerrados -- cargaba limpio como
+        ``{1: ('x', 'y')}``, y el ``TypeError`` aparecia despues, dentro de
+        ``canvas_size_for`` en el constructor del ``Pipeline``. Ese
+        constructor vive en el ``try`` de ``main()`` cuyo unico manejador es
+        ``except _StartupError``, asi que escapaba como traceback crudo.
+        ``{"3": "215,118"}`` hacia lo mismo por otro camino (una cadena de 6
+        caracteres no es una pareja de numeros). Validar la forma de cada
+        VALOR es lo que cierra la clase entera, en vez de los dos ejemplos
+        conocidos.
         """
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         if not isinstance(data, dict):
@@ -80,5 +136,7 @@ class AppConfig:
                 "marker_layout must be a JSON object mapping marker id to [x, y], got "
                 f"{type(raw_layout).__name__}"
             )
-        data["marker_layout"] = {int(k): tuple(v) for k, v in raw_layout.items()}
+        data["marker_layout"] = {
+            int(key): _layout_entry(key, value) for key, value in raw_layout.items()
+        }
         return cls(**data)

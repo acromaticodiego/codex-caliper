@@ -1,6 +1,8 @@
 """Tests de calibracion intrinseca: recuperacion de K/distorsion, umbral de
 aceptacion, persistencia y la guardia de resolucion contra zoom movido."""
 
+import json
+
 import numpy as np
 import cv2
 import pytest
@@ -199,3 +201,70 @@ def test_dist_coeffs_stays_1d_after_save_and_load_roundtrip(tmp_path):
 
     assert loaded.dist_coeffs.shape == (5,)
     assert loaded.dist_coeffs[0] == pytest.approx(-0.22)
+
+
+# ---------------------------------------------------------------------------
+# Forma de ``image_size`` (ronda de correcciones finales, minor)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        pytest.param({"w": 1920, "h": 1080}, id="object-instead-of-pair"),
+        pytest.param("19", id="two-character-string"),
+        pytest.param([1920, 1080, 3], id="three-components"),
+        pytest.param([1920], id="one-component"),
+        pytest.param(1920, id="bare-number"),
+        pytest.param([1920, None], id="null-component"),
+        pytest.param([True, False], id="booleans"),
+    ],
+)
+def test_an_image_size_of_the_wrong_shape_raises_value_error(tmp_path, bad_value):
+    """``tuple()`` sobre un OBJETO de JSON devuelve sus CLAVES.
+
+    La implementacion equivocada que esta prueba RECHAZA es
+    ``image_size=tuple(data["image_size"])``: con ella,
+    ``{"w": 1920, "h": 1080}`` -- una forma que alguien escribe a mano con
+    toda naturalidad -- se carga como ``('w', 'h')`` sin ningun error.
+
+    No es corrupcion silenciosa (``require_compatible`` bloquea la medicion
+    igual), pero culpa a la cosa equivocada: el operador lee "Recalibrate --
+    a zoom or focus ring may have moved" y repite el paso MAS CARO de todo
+    el procedimiento por un campo mal escrito en un JSON. ``"19"`` y los
+    booleanos estan aqui por lo mismo que en ``test_config.py``: longitud 2
+    y ``isinstance(True, int)``.
+    """
+    path = tmp_path / "intrinsics.json"
+    path.write_text(
+        json.dumps(
+            {
+                "camera_matrix": [[1500.0, 0.0, 960.0], [0.0, 1500.0, 540.0], [0.0, 0.0, 1.0]],
+                "dist_coeffs": [0.0, 0.0, 0.0, 0.0, 0.0],
+                "rms_px": 0.21,
+                "image_size": bad_value,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError) as excinfo:
+        Intrinsics.load(path)
+    assert "image_size" in str(excinfo.value)
+
+
+def test_a_well_shaped_image_size_still_loads(tmp_path):
+    """El otro lado del mecanismo: lo valido sigue cargando, y sigue siendo
+    una pareja de ENTEROS (``require_compatible`` compara contra la tupla de
+    enteros que entrega ``CameraThread.actual_size``, asi que un 1920.0
+    flotante tendria que fallar esa comparacion)."""
+    path = tmp_path / "intrinsics.json"
+    Intrinsics(
+        camera_matrix=np.eye(3),
+        dist_coeffs=np.zeros(5),
+        rms_px=0.21,
+        image_size=(1920, 1080),
+    ).save(path)
+
+    loaded = Intrinsics.load(path)
+    assert loaded.image_size == (1920, 1080)
+    loaded.require_compatible((1920, 1080))

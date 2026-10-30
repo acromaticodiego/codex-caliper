@@ -177,6 +177,51 @@ def test_main_reports_a_clear_error_when_marker_layout_is_not_an_object(tmp_path
     assert "Traceback" not in err
 
 
+def test_main_reports_a_clear_error_when_a_marker_layout_entry_has_the_wrong_shape(
+    tmp_path, capsys
+):
+    """I6 (ronda de correcciones finales): la validacion de forma miraba los
+    CONTENEDORES, no las entradas.
+
+    Este caso es un VALOR mal formado, no otro contenedor mal formado -- los
+    dos casos de contenedor ya estan cubiertos arriba, y repetir ese molde
+    habria fijado las dos entradas conocidas en vez del mecanismo.
+    ``{"1": {"x": 0, "y": 0}}`` es el mismo genero de desliz de edicion a
+    mano: cargaba limpio como ``{1: ('x', 'y')}`` y reventaba DESPUES, con un
+    ``TypeError`` desde ``canvas_size_for`` dentro del constructor del
+    ``Pipeline``. Ese constructor vive en el ``try`` de ``main()`` cuyo unico
+    manejador es ``except _StartupError``, asi que el ``TypeError`` escapaba
+    como traceback crudo -- despues del sondeo de camara, en el peor momento
+    posible.
+
+    La implementacion equivocada que esta prueba RECHAZA es la anterior: con
+    ella, ``"Traceback" not in err`` falla.
+    """
+    # Los CUATRO ids declarados estan presentes -- solo UNO tiene la forma
+    # equivocada. Es deliberado: con ids faltantes,
+    # ``_require_measured_layout`` dispara primero y el operador recibe un
+    # mensaje que habla de ids sin medir, no del valor malformado. Con el
+    # layout completo, la version anterior llegaba hasta
+    # ``canvas_size_for`` en el constructor del ``Pipeline`` y escapaba como
+    # traceback -- que es el defecto real.
+    broken = tmp_path / "app.json"
+    broken.write_text(
+        '{"marker_thickness_mm": 2.0, "marker_layout": {'
+        '"1": [0.0, 0.0], "2": [215.0, 0.0], "3": {"x": 215, "y": 118}, "4": [0.0, 118.0]}}',
+        encoding="utf-8",
+    )
+    exit_code = main(
+        ["--config", str(broken), "--intrinsics", str(_write_valid_intrinsics(tmp_path))],
+        open_capture=lambda index, **kwargs: FakeCapture(),
+    )
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "could not be read" in err
+    assert "marker_layout" in err
+    assert "'3'" in err, "el mensaje tiene que nombrar la entrada que esta mal"
+    assert "Traceback" not in err
+
+
 def test_main_reports_a_clear_error_when_the_marker_layout_is_missing(tmp_path, capsys):
     """Sin ``marker_layout`` el lienzo no se puede dimensionar.
 

@@ -27,6 +27,41 @@ import numpy as np
 INTRINSICS_MAX_RMS_PX = 0.5
 
 
+#: Componentes de ``image_size``: (ancho, alto) en pixeles.
+_IMAGE_SIZE_COMPONENTS = 2
+
+
+def _image_size(value: object) -> tuple[int, int]:
+    """Valida ``image_size`` y lo devuelve como ``(ancho, alto)`` de enteros.
+
+    Rechaza ``str``/``bytes`` antes de medir longitud por la misma razon que
+    ``config._layout_entry``: ``"19"`` es una secuencia de dos elementos y
+    pasaria una comprobacion de longitud a secas. ``bool`` se rechaza como
+    entero (``isinstance(True, int)`` es ``True``).
+
+    Lanza ``ValueError``, que la tupla de ``_load_intrinsics``
+    (``__main__.py``) ya atrapa y convierte en una linea para el operador.
+    """
+    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
+        raise ValueError(
+            "image_size must be a list of two integers [width, height] in pixels, got "
+            f"{type(value).__name__}"
+        )
+    if len(value) != _IMAGE_SIZE_COMPONENTS:
+        raise ValueError(
+            f"image_size must have exactly {_IMAGE_SIZE_COMPONENTS} components "
+            f"[width, height], got {len(value)}"
+        )
+    for component in value:
+        if isinstance(component, bool) or not isinstance(component, (int, float)):
+            raise ValueError(
+                f"image_size components must be numbers, got {component!r} "
+                f"({type(component).__name__})"
+            )
+    width, height = value
+    return int(width), int(height)
+
+
 class IntrinsicsMismatch(Exception):
     """Se lanza cuando los intrinsecos guardados se calibraron a una resolucion
     distinta de la que la camara esta entregando ahora."""
@@ -96,13 +131,24 @@ class Intrinsics:
 
     @classmethod
     def load(cls, path: str | Path) -> "Intrinsics":
-        """Carga desde JSON, reconstruyendo los ``ndarray`` con ``np.asarray``."""
+        """Carga desde JSON, reconstruyendo los ``ndarray`` con ``np.asarray``.
+
+        ``image_size`` se valida en vez de pasar por ``tuple(...)`` a ciegas
+        (ronda de correcciones finales). ``tuple()`` sobre un OBJETO de JSON
+        devuelve sus CLAVES: ``{"w": 1920, "h": 1080}`` -- una forma que
+        alguien escribe a mano con toda naturalidad -- se cargaba como
+        ``('w', 'h')`` sin ningun error. No era corrupcion silenciosa:
+        ``require_compatible`` despues bloquea la medicion igual. Pero
+        culpaba a la cosa equivocada -- el operador leia "Recalibrate -- a
+        zoom or focus ring may have moved" y repetia el paso mas caro de
+        todo el procedimiento por un campo mal escrito en un JSON.
+        """
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         return cls(
             camera_matrix=np.asarray(data["camera_matrix"], dtype=np.float64),
             dist_coeffs=np.asarray(data["dist_coeffs"], dtype=np.float64),
             rms_px=float(data["rms_px"]),
-            image_size=tuple(data["image_size"]),
+            image_size=_image_size(data["image_size"]),
             zoom_note=data.get("zoom_note", ""),
         )
 
