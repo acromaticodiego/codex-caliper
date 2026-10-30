@@ -262,6 +262,17 @@ def test_main_reports_a_clear_error_when_ultralytics_is_not_installed(
     sistema -- y sin este camino llega al operador como un traceback. Se
     fuerza con ``sys.modules`` para que el resultado no dependa de si la
     maquina tiene o no ``ultralytics`` instalado.
+
+    La ultima asercion es la que de verdad discrimina (ronda de fix 2,
+    siguiendo a la correccion de Finding 2). ``"ultralytics" in err`` pasa
+    SOLO porque el texto del ``ImportError`` forzado ("import of
+    ultralytics halted...") ya contiene esa palabra, y ``"pip install" in
+    err`` pasa con cualquier comando de pip -- las dos dejan pasar
+    ``'pip install ultralytics'``, el comando VIEJO que ya no coincide con
+    el paquete desde que ``ultralytics`` se movio al extra ``live`` en
+    ``pyproject.toml``. Solo pinnear el comando exacto que el operador
+    deberia ejecutar -- el mismo que documenta el README -- detecta esa
+    regresion.
     """
     cfg_path = _write_valid_config(tmp_path)
     intrinsics_path = _write_valid_intrinsics(tmp_path)
@@ -276,6 +287,7 @@ def test_main_reports_a_clear_error_when_ultralytics_is_not_installed(
     err = capsys.readouterr().err
     assert "ultralytics" in err.lower()
     assert "pip install" in err.lower()
+    assert 'pip install -e ".[live]"' in err
     assert "Traceback" not in err
 
 

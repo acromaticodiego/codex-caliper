@@ -217,7 +217,8 @@ def _build_detector() -> BananaDetector:
     except ImportError as exc:
         raise _StartupError(
             f"the YOLO backend is unavailable: {exc}. Install it with "
-            "'pip install ultralytics' (it pulls in torch, about 2.5 GB)."
+            '\'pip install -e ".[live]"\' (the live extra; it pulls in torch, '
+            "about 2.5 GB)."
         ) from exc
 
 
