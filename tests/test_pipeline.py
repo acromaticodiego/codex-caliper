@@ -785,6 +785,59 @@ def test_bananas_within_the_closing_bridge_are_refused_with_a_warning(touching_s
     assert any("separate" in w.lower() for w in r.warnings), r.warnings
 
 
+def test_the_adjacency_warning_the_pipeline_writes_is_the_one_the_window_shows(
+    touching_scene_and_cfg, qtbot
+):
+    """C2 (CRITICO, ronda de correcciones finales): la costura productor ->
+    consumidor de ``FrameResult.warnings``.
+
+    ``warnings`` no tenia NINGUN consumidor en todo el proyecto:
+    ``MainWindow.update_frame_result`` leia ``plane`` y ``results`` y pasaba
+    de largo. Los cinco mensajes de operador que este modulo escribe eran
+    inalcanzables, entre ellos el de esta prueba -- y la spec S7 etapa 4 no
+    lo deja opcional: con dos mascaras fusionadas el sistema tiene que
+    negarse a medir *y mostrar el aviso*, porque "una medida falsa es peor
+    que ninguna".
+
+    Esta prueba vive aqui, junto al fixture que produce el caso real, porque
+    lo que fija no es "la ventana muestra algo": es que la REDACCION EXACTA
+    que ``Pipeline.process`` compone llegue intacta a lo que el operador lee.
+    Una prueba del lado de la interfaz con un ``warnings`` escrito a mano (la
+    hay, en ``test_ui_layout.py``) rechaza la implementacion que ignora el
+    campo, pero no detecta que alguien reescriba el mensaje de este modulo y
+    deje al operador sin la frase de accion.
+
+    La implementacion equivocada que RECHAZA: cualquiera en la que el aviso
+    del pipeline no sea literalmente el texto mostrado -- se afirma la
+    inclusion del mensaje COMPLETO, carácter por carácter, no una subcadena
+    elegida a mano.
+    """
+    from codex_caliper.ui.main_window import MainWindow
+
+    scene, cfg = touching_scene_and_cfg
+    pipeline, _ = _build(scene, cfg, correct_parallax=False)
+    result = pipeline.process(scene)
+
+    adjacency_warnings = [w for w in result.warnings if "separate" in w.lower()]
+    assert adjacency_warnings, result.warnings
+
+    window = MainWindow(intrinsics=_identity_intrinsics(scene))
+    qtbot.addWidget(window)
+    window.update_frame_result(result)
+
+    shown = window.notice_text()
+    for warning in adjacency_warnings:
+        assert warning in shown, f"el aviso del pipeline no llego a la interfaz: {warning!r}"
+    # La frase de ACCION es la mitad util del mensaje: un canal que mostrara
+    # un generico "a warning occurred" dejaria al operador sin saber que hacer.
+    assert "Separate them on the tray." in shown
+    # Y el panel no puede decir "sin fruta" como si no pasara nada: el cuadro
+    # no es medible, y la razon ahora se puede leer.
+    assert result.results == []
+
+    window.close()
+
+
 def test_two_well_separated_bananas_are_both_measured(plump_scene, plump_cfg):
     """La contraparte positiva de la adyacencia: a 30 mm de separacion -- la
     distancia a la que el fixture y el rig real colocan dos frutos -- los dos

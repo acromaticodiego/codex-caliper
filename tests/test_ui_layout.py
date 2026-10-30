@@ -48,14 +48,16 @@ from PySide6.QtCore import QThread, Qt
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QFrame, QLabel
 
+import threading
+
 from codex_caliper.aruco_tools import CalibrationState
 from codex_caliper.camera import CameraThread
 from codex_caliper.codex import CodexVerdict
-from codex_caliper.homography import PlaneCalibration
-from codex_caliper.intrinsics import Intrinsics
+from codex_caliper.homography import DegenerateMarkerLayout, PlaneCalibration
+from codex_caliper.intrinsics import Intrinsics, IntrinsicsMismatch
 from codex_caliper.pipeline import MARKER_COUNT, BananaResult, FrameResult
 from codex_caliper.aggregation import TrackAggregate
-from codex_caliper.ui.main_window import MainWindow
+from codex_caliper.ui.main_window import RESIDUAL_WARN_MM, MainWindow
 from codex_caliper.ui.overlay import text_anchor_for
 from codex_caliper.ui.side_panel import SIDE_PANEL_WIDTH_PX, SidePanel
 from codex_caliper.ui.video_view import PIP_MIN_WIDTH_PX, PIP_SCALE, VideoView
@@ -159,6 +161,59 @@ class RecordingPipeline:
         return _frame_result(rectified=frame, raw=frame)
 
 
+class BlockingPipeline:
+    """``Pipeline`` sustituto que se QUEDA dentro de ``process`` hasta que la
+    prueba lo suelta.
+
+    Es la unica forma de ejercitar la contrapresion (C1): con un pipeline
+    instantaneo, el worker vacia la cola entre una entrega y la siguiente y
+    nunca se llega al estado "ocupado" que la contrapresion gobierna -- la
+    prueba quedaria en verde con y sin bandera.
+    """
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.frames: list[np.ndarray] = []
+        self._lock = threading.Lock()
+
+    def process(self, frame: np.ndarray) -> FrameResult:
+        with self._lock:
+            self.frames.append(frame)
+        self.entered.set()
+        self.release.wait(timeout=5.0)
+        return _frame_result(rectified=frame, raw=frame, plane=_plane())
+
+    def frame_values(self) -> list[int]:
+        with self._lock:
+            return [int(f.flat[0]) for f in self.frames]
+
+
+class RaisingPipeline:
+    """``Pipeline`` sustituto que lanza una de las DOS excepciones que
+    ``Pipeline.process`` documenta (I5)."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+        self.calls = 0
+
+    def process(self, frame: np.ndarray) -> FrameResult:
+        self.calls += 1
+        raise self._exc
+
+
+def _pip_color(window: MainWindow):
+    """Color de un pixel del PiP, que es la capa CRUDA de ``VideoView``.
+
+    Los cuadros sinteticos de este archivo son uniformes, asi que el valor
+    de un pixel del PiP identifica inequivocamente de QUE cuadro de camara
+    se construyo -- que es como se distingue "el video sigue a la camara"
+    de "el video sigue al pipeline" sin leer ninguna bandera interna.
+    """
+    image = window.video_view.pip_pixmap.toImage()
+    return image.pixelColor(image.width() // 2, image.height() // 2)
+
+
 # ---------------------------------------------------------------------------
 # Layout (spec S8 variante 1)
 # ---------------------------------------------------------------------------
@@ -218,7 +273,18 @@ def test_pip_toggles_with_the_keyboard_in_both_directions(qtbot):
 def test_pip_is_rendered_small_but_still_legible(qtbot):
     """Ruling 1: ``pip.width() < main.width() // 3`` por si solo lo satisface
     un PiP de un pixel. Se agrega un piso absoluto de legibilidad: el PiP
-    tiene que ser chico Y seguir sirviendo como miniatura en un video real."""
+    tiene que ser chico Y seguir sirviendo como miniatura en un video real.
+
+    I11 (ronda de correcciones finales): esta prueba afirmaba ``>= 100``
+    contra un piso real de ``PIP_MIN_WIDTH_PX = 160``, asi que no podia
+    fallar por el valor que dice proteger -- cualquier piso entre 100 y 160
+    la deja verde. Peor: con los 640 px de entrada de este caso,
+    ``target_width = max(160, round(640 * 0.25)) = 160``, o sea que gana
+    ``PIP_SCALE`` y el piso NO es la restriccion activa: ningun valor del
+    piso por debajo de 160 cambia el resultado. Se afirma la constante real
+    Y se agrega el caso donde el piso de verdad manda (ver la prueba de
+    abajo).
+    """
     view = VideoView()
     qtbot.addWidget(view)
 
@@ -227,7 +293,33 @@ def test_pip_is_rendered_small_but_still_legible(qtbot):
     view.set_frame(rectified, raw)
 
     assert view.pip_pixmap.width() < view.main_pixmap.width() // 3
-    assert view.pip_pixmap.width() >= 100, "el PiP no puede degenerar a algo ilegible en video"
+    assert view.pip_pixmap.width() >= PIP_MIN_WIDTH_PX, (
+        "el PiP no puede degenerar a algo ilegible en video"
+    )
+
+
+def test_pip_floor_binds_on_a_narrow_raw_frame(qtbot):
+    """I11: el caso donde ``PIP_MIN_WIDTH_PX`` es la restriccion ACTIVA.
+
+    Con un cuadro crudo de 320 px, ``round(320 * PIP_SCALE) = 80`` esta por
+    DEBAJO del piso, asi que el piso es lo que decide el ancho. Rebajar
+    ``PIP_MIN_WIDTH_PX`` (a 80, a 1) cambia el resultado de esta prueba y la
+    pone roja -- cosa que la prueba de arriba, con su cuadro de 640 px, no
+    puede hacer ni con el piso en cero.
+
+    Se exige ademas que el piso no AGRANDE la miniatura por encima del
+    cuadro crudo (``_downscale_for_pip`` devuelve el cuadro tal cual en ese
+    caso): un piso que escalara hacia arriba inventaria pixeles.
+    """
+    view = VideoView()
+    qtbot.addWidget(view)
+
+    raw = _frame(320, 240)
+    view.set_frame(_frame(900, 600), raw)
+
+    assert round(320 * PIP_SCALE) < PIP_MIN_WIDTH_PX, "el fixture debe caer bajo el piso"
+    assert view.pip_pixmap.width() == PIP_MIN_WIDTH_PX
+    assert view.pip_pixmap.width() <= raw.shape[1], "el piso no puede agrandar la miniatura"
 
 
 def test_status_bar_shows_calibration_state_in_english(qtbot):
@@ -255,9 +347,18 @@ def test_blocked_calibration_is_a_warning_but_healthy_calibration_is_not(qtbot):
         )
     )
     assert window.status_is_warning() is True
+    # C2 (ronda de correcciones finales): esta prueba PASABA una lista de
+    # ``warnings`` poblada y nunca comprobaba que llegara a ninguna parte --
+    # creaba la apariencia de cobertura de un canal que no existia
+    # (``update_frame_result`` leia ``plane`` y ``results`` e ignoraba
+    # ``warnings``). El aviso del pipeline tiene que poder LEERSE.
+    assert "only 2/4 ArUco markers" in window.notice_text()
 
     window.update_frame_result(_frame_result(rectified=_frame(900, 600), plane=_plane()))
     assert window.status_is_warning() is False
+    # Y el lado sano no deja un aviso viejo colgado en pantalla: un canal que
+    # solo acumula es tan inutil como uno que no muestra nada.
+    assert window.notice_text() == ""
 
 
 def test_status_bar_shows_degraded_markers_as_a_warning_with_three_markers(qtbot):
@@ -280,12 +381,18 @@ def test_status_bar_shows_degraded_markers_as_a_warning_with_three_markers(qtbot
 
     assert f"3/{MARKER_COUNT} markers" in window.status_text()
     assert window.status_is_warning() is True
+    # C2: igual que la prueba de arriba, esta pasaba ``warnings`` y no
+    # comprobaba que se vieran. El texto del aviso de degradacion dice algo
+    # que la barra de estado NO dice -- sobre cuantas correspondencias de
+    # esquina se esta midiendo -- asi que perderlo no es redundante.
+    assert "Degraded calibration" in window.notice_text()
 
     # Y el lado sano sigue sin avisar -- la misma distincion que la Ruling 1
     # ya exigio para el caso bloqueado/sano (no "avisa siempre").
     window.update_frame_result(_frame_result(rectified=_frame(900, 600), plane=_plane()))
     assert f"{MARKER_COUNT}/{MARKER_COUNT} markers" in window.status_text()
     assert window.status_is_warning() is False
+    assert window.notice_text() == ""
 
 
 def test_side_panel_does_not_leave_stale_cards_visible_after_an_update(qtbot):
@@ -309,7 +416,10 @@ def test_side_panel_does_not_leave_stale_cards_visible_after_an_update(qtbot):
     # casualidad, antes de que la prueba lo mirara). Lo que tiene que ser
     # INMEDIATO es la desconexion del arbol de widgets visible
     # (``setParent(None)``), no la liberacion de memoria.
-    panel.update_results([_banana_result(track_id=1)])
+    # La escala se pasa EXPLICITA: ``update_results`` ya no tiene un
+    # default de 0.2 mm/px (era codigo muerto, y un default plausible en el
+    # camino de la escala invita a medir con una escala que nadie calibro).
+    panel.update_results([_banana_result(track_id=1)], 0.2)
     stale_labels_before = [
         child for child in panel._cards_container.findChildren(QLabel) if child.text() == "No fruit detected"
     ]
@@ -451,7 +561,8 @@ def test_resolution_mismatch_blocks_measurement_instead_of_measuring_wrong(qtbot
     monkeypatch.setattr(camera_module, "open_capture", lambda *a, **kw: _FakeCapture())
 
     # Calibrado a 1920x1080; la camara falsa concede 1280x720.
-    window = MainWindow(intrinsics=_intrinsics(image_size=(1920, 1080)), pipeline=RecordingPipeline())
+    pipeline = RecordingPipeline()
+    window = MainWindow(intrinsics=_intrinsics(image_size=(1920, 1080)), pipeline=pipeline)
     qtbot.addWidget(window)
 
     thread = CameraThread(0)
@@ -465,6 +576,13 @@ def test_resolution_mismatch_blocks_measurement_instead_of_measuring_wrong(qtbot
     assert window.measurement_enabled is False
     assert "1280" in window.blocked_reason() or "720" in window.blocked_reason()
     assert window.status_is_warning() is True
+    # I10 (ronda de correcciones finales): "bloquea la medicion" tiene que
+    # significar que NINGUN cuadro llega al pipeline, no solo que una
+    # propiedad devuelva ``False``. Esta prueba ya tenia un
+    # ``RecordingPipeline`` conectado y nunca lo miraba; el ``qtbot.wait(100)``
+    # de arriba ya le dio al worker tiempo de sobra para haber procesado el
+    # cuadro si la compuerta no estuviera.
+    assert pipeline.threads == [], "no se puede medir con unos intrinsecos de otra resolucion"
 
     window.close()
 
@@ -588,6 +706,360 @@ def test_video_keeps_updating_while_measurement_is_gated_off(qtbot):
 
     assert not window.video_view.main_pixmap.isNull(), "el video no puede quedar vacio mientras la camara entrega cuadros"
     assert window.video_view.is_showing_raw_fallback is True
+
+    # I10 (ronda de correcciones finales): sin esta espera la asercion de
+    # abajo NO PODIA FALLAR. ``submit_frame`` emite una senal encolada hacia
+    # otro hilo; en el instante siguiente a la llamada, el worker todavia no
+    # pudo haber sacado nada de la cola, asi que ``pipeline.threads == []``
+    # se cumplia con la compuerta y sin ella. 100 ms es mas de lo que tarda
+    # ``RecordingPipeline.process`` por tres ordenes de magnitud.
+    qtbot.wait(100)
     assert pipeline.threads == [], "ningun cuadro debe llegar al pipeline mientras la medicion esta bloqueada"
+    # El operador tambien tiene que poder LEER por que no se esta midiendo.
+    assert "no intrinsic calibration" in window.notice_text().lower()
 
     window.close()
+
+
+# ---------------------------------------------------------------------------
+# C1 -- contrapresion y cadencia del video
+# ---------------------------------------------------------------------------
+
+
+def test_only_one_frame_is_in_flight_and_the_backlog_is_coalesced(qtbot):
+    """C1 (CRITICO): ``_on_camera_frame`` llamaba a ``submit_frame`` por CADA
+    cuadro de camara sobre una conexion encolada de Qt SIN TOPE -- ni bandera
+    de ocupado, ni descarte, ni ``BlockingQueuedConnection``. A 30 cuadros/s
+    de entrada contra 3-10 cuadros/s de rendimiento real del pipeline en CPU
+    se acumulan ~25 cuadros/s de ~6.2 MB cada uno (~155 MB/s): la memoria del
+    proceso se agota en 30-60 segundos, dentro del primer minuto de la unica
+    demostracion que el proyecto publica.
+
+    La implementacion equivocada que esta prueba RECHAZA es exactamente la
+    anterior: sin bandera de ocupado, los diez cuadros que se entregan
+    mientras el worker esta bloqueado se encolan todos y el pipeline termina
+    viendo los once. Con contrapresion ve DOS: el que atrapo primero y el
+    ULTIMO que llego mientras estaba ocupado -- los nueve intermedios se
+    descartan, que es lo correcto y no solo lo barato (para fruta quieta, el
+    cuadro util es el mas reciente).
+
+    Una asercion de tipo "paso algo" no distingue las dos: hay que fijar el
+    conjunto EXACTO de cuadros que vio el pipeline.
+    """
+    pipeline = BlockingPipeline()
+    window = MainWindow(intrinsics=_intrinsics(), pipeline=pipeline)
+    qtbot.addWidget(window)
+
+    # Cuadro 0: lo toma el worker y se queda dentro de ``process``.
+    window.submit_frame(_frame(32, 24, value=0))
+    assert pipeline.entered.wait(timeout=5.0), "el worker nunca entro a process"
+
+    # Cuadros 1..10 con el worker ocupado: nueve se tienen que perder.
+    for value in range(1, 11):
+        window.submit_frame(_frame(32, 24, value=value))
+
+    assert window.dropped_frame_count == 9, (
+        f"se descartaron {window.dropped_frame_count} cuadros, deberian ser 9 "
+        "(sin contrapresion se descartan 0 y los once se encolan)"
+    )
+
+    pipeline.release.set()
+    qtbot.waitUntil(lambda: len(pipeline.frames) == 2, timeout=5000)
+    qtbot.wait(100)
+
+    assert pipeline.frame_values() == [0, 10], (
+        "el pipeline debe ver el primer cuadro y el ULTIMO, nunca la cola entera"
+    )
+
+    window.close()
+
+
+def test_the_video_follows_the_camera_not_the_pipeline(qtbot):
+    """C1, segunda mitad: con la medicion activa, ``video_view`` se
+    actualizaba UNICAMENTE desde ``update_frame_result``, asi que la cadencia
+    del video ERA la cadencia del pipeline (3-10/s en CPU) -- lo contrario de
+    lo que el README afirmaba y de lo que la spec S13 publica como su
+    artefacto de mayor impacto.
+
+    La implementacion equivocada que esta prueba RECHAZA: la anterior, en la
+    que ``_on_camera_frame`` reenvia el cuadro y no pinta nada. Aqui el
+    pipeline se queda BLOQUEADO dentro de ``process`` -- no puede devolver
+    ningun resultado -- y a pesar de eso cada cuadro nuevo de camara tiene
+    que cambiar los pixeles de la capa cruda. Si la pintura dependiera del
+    pipeline, los tres cuadros se verian identicos.
+    """
+    pipeline = BlockingPipeline()
+    window = MainWindow(intrinsics=_intrinsics(), pipeline=pipeline)
+    qtbot.addWidget(window)
+
+    # El primer cuadro entra al worker, que se queda DENTRO de ``process``:
+    # a partir de aqui el pipeline no puede devolver nada, y se espera el
+    # evento en vez de confiar en el reloj (la cola de Qt es asincrona).
+    window._on_camera_frame(_frame(640, 480, value=30))
+    assert pipeline.entered.wait(timeout=5.0), "el worker nunca entro a process"
+
+    assert not window.video_view.pip_pixmap.isNull(), (
+        "el primer cuadro de camara no pinto nada -- el video depende del pipeline"
+    )
+    seen = [_pip_color(window).red()]
+    for value in (140, 250):
+        window._on_camera_frame(_frame(640, 480, value=value))
+        seen.append(_pip_color(window).red())
+
+    assert len(set(seen)) == 3, (
+        f"el video no siguio a la camara: los tres cuadros se vieron como {seen} "
+        "mientras el pipeline estaba bloqueado"
+    )
+    # Y lo que se ve es el ULTIMO cuadro de camara, no el primero que el
+    # pipeline alcanzo a tomar.
+    assert abs(seen[-1] - 250) <= 2
+
+    pipeline.release.set()
+    window.close()
+
+
+# ---------------------------------------------------------------------------
+# C2 -- los avisos del pipeline tienen un canal donde verse
+# ---------------------------------------------------------------------------
+
+
+def test_the_adjacency_refusal_reaches_the_live_view(qtbot):
+    """C2 (CRITICO): ``FrameResult.warnings`` no tenia NINGUN consumidor en
+    todo el proyecto. El pipeline escribe ahi cinco mensajes de operador
+    distintos y ninguno podia verse -- incluido el de dos frutos pegados, que
+    la spec S7 etapa 4 no deja opcional: el sistema tiene que negarse a medir
+    *y mostrar el aviso*, porque "una medida falsa es peor que ninguna".
+
+    El fallo normal: dos bananos a 1.5 mm, el panel dice "No fruit detected"
+    y la barra de estado se ve perfectamente sana -- sin ninguna via para
+    enterarse de que el sistema esta rechazando, ni por que.
+
+    La implementacion equivocada que esta prueba RECHAZA es la anterior, que
+    leia ``plane`` y ``results`` y pasaba de largo por ``warnings``. Se
+    afirma la FRASE DE ACCION completa ("Separate them on the tray."), no
+    solo que el texto no este vacio: un canal que muestre un generico "a
+    warning occurred" deja al operador sin saber que hacer, y pasaria una
+    asercion mas laxa.
+
+    La prueba que fija la redaccion exacta del productor contra este mismo
+    canal vive junto a su fixture, en
+    ``tests/test_pipeline.py::test_the_adjacency_warning_the_pipeline_writes_is_the_one_the_window_shows``.
+    """
+    window = MainWindow(intrinsics=_intrinsics())
+    qtbot.addWidget(window)
+
+    window.update_frame_result(
+        _frame_result(
+            rectified=_frame(900, 600),
+            plane=_plane(),
+            results=[],
+            warnings=[
+                "Fruits 1 and 2 are closer than 2.0 mm, so they cannot be measured "
+                "separately. Separate them on the tray."
+            ],
+        )
+    )
+
+    assert "Separate them on the tray." in window.notice_text()
+    assert "closer than 2.0 mm" in window.notice_text()
+
+
+def test_several_warnings_are_all_shown_not_just_the_first(qtbot):
+    """Un cuadro puede traer varios avisos a la vez (calibracion degradada
+    MAS un fruto que toca el borde del area calibrada). Un canal que muestre
+    solo ``warnings[0]`` esconde el resto -- y en ese par concreto el que se
+    perderia es el que explica por que falta una medida."""
+    window = MainWindow(intrinsics=_intrinsics())
+    qtbot.addWidget(window)
+
+    window.update_frame_result(
+        _frame_result(
+            rectified=_frame(900, 600),
+            plane=_plane(state=CalibrationState.DEGRADED),
+            warnings=[
+                "Degraded calibration: 3/4 ArUco markers visible.",
+                "Fruit 4: its outline touches the border of the calibrated area.",
+            ],
+        )
+    )
+
+    assert "Degraded calibration" in window.notice_text()
+    assert "touches the border" in window.notice_text()
+
+
+# ---------------------------------------------------------------------------
+# I5 -- una excepcion del pipeline no es un traceback por cuadro
+# ---------------------------------------------------------------------------
+
+
+def test_a_degenerate_marker_layout_becomes_an_operator_message_not_a_traceback(qtbot):
+    """I5: ``Pipeline.process`` DOCUMENTA que lanza ``DegenerateMarkerLayout``
+    (``marker_layout`` colineal, un error de tipeo que pasa la validacion de
+    arranque) y no habia ningun manejador. El resultado era un traceback
+    crudo por CADA cuadro, el video congelado y la barra de estado en verde:
+    el contrato "nunca un traceback" del punto de entrada valia solo hasta
+    que existia una ventana.
+
+    La implementacion equivocada que esta prueba RECHAZA: la anterior, sin
+    ``try`` en el worker -- la excepcion viaja por el bucle de eventos de Qt
+    y la ventana no se enterera de nada (``measurement_enabled`` seguiria en
+    ``True`` y ``notice_text()`` vacio).
+
+    Se afirma ademas que el pipeline se llama UNA SOLA VEZ: bloquear la
+    medicion es lo que impide que el cuadro pendiente se reentregue y la
+    ventana quede girando sobre el mismo error un cuadro a la vez.
+    """
+    pipeline = RaisingPipeline(DegenerateMarkerLayout("collinear marker positions"))
+    window = MainWindow(intrinsics=_intrinsics(), pipeline=pipeline)
+    qtbot.addWidget(window)
+
+    window._on_camera_frame(_frame(64, 48))
+    qtbot.waitUntil(lambda: window.notice_text() != "", timeout=2000)
+
+    assert "marker_layout" in window.notice_text()
+    assert window.measurement_enabled is False
+    assert window.status_is_warning() is True
+
+    # Un segundo cuadro de camara no vuelve a entrar al pipeline.
+    window._on_camera_frame(_frame(64, 48, value=200))
+    qtbot.wait(100)
+    assert pipeline.calls == 1, "la medicion bloqueada no puede seguir reintentando"
+
+    window.close()
+
+
+def test_an_intrinsics_mismatch_raised_inside_the_pipeline_blocks_measurement(qtbot):
+    """I5, la otra excepcion documentada. Se enruta al MISMO campo que la
+    guardia de ``actual_size`` (misma causa, mismo mensaje), para que
+    ``load_intrinsics`` la limpie igual que limpia la otra -- a diferencia
+    del layout degenerado, que ninguna calibracion nueva arregla."""
+    pipeline = RaisingPipeline(IntrinsicsMismatch("calibrated at (1920, 1080), got (1280, 720)"))
+    window = MainWindow(intrinsics=_intrinsics(), pipeline=pipeline)
+    qtbot.addWidget(window)
+
+    window._on_camera_frame(_frame(64, 48))
+    qtbot.waitUntil(lambda: window.notice_text() != "", timeout=2000)
+
+    assert "1280" in window.notice_text()
+    assert window.measurement_enabled is False
+
+    window.load_intrinsics(_intrinsics(image_size=(1280, 720)))
+    assert window.measurement_enabled is True, (
+        "una calibracion nueva tiene que poder deshacer un bloqueo de resolucion"
+    )
+
+    window.close()
+
+
+# ---------------------------------------------------------------------------
+# I4 -- load_intrinsics tambien reemplaza los del pipeline
+# ---------------------------------------------------------------------------
+
+
+class _IntrinsicsHoldingPipeline:
+    """Sustituto que solo guarda sus intrinsecos, como hace ``Pipeline``."""
+
+    def __init__(self, intrinsics: Intrinsics) -> None:
+        self.intrinsics = intrinsics
+
+    def process(self, frame: np.ndarray) -> FrameResult:
+        return _frame_result(rectified=frame, raw=frame, plane=_plane())
+
+
+def test_load_intrinsics_also_replaces_the_pipelines_own_reference(qtbot):
+    """I4: ``Pipeline`` guarda su PROPIA referencia a los intrinsecos y la usa
+    para ``undistort`` en cada cuadro. ``load_intrinsics`` actualizaba solo la
+    de la ventana, asi que la barra de estado habria mostrado el RMS de la
+    calibracion NUEVA mientras cada medida se seguia corrigiendo con la
+    VIEJA -- en verde, sin ningun aviso.
+
+    ``require_compatible`` no cubre este camino: dos calibraciones de la MISMA
+    resolucion y distinta distorsion pasan esa guardia sin objetar nada. Por
+    eso la asercion compara el OBJETO, no la resolucion.
+
+    La implementacion equivocada que esta prueba RECHAZA: la anterior, que
+    asignaba ``self._intrinsics`` y nada mas. Hoy es inalcanzable (nadie
+    llama a ``set_live_frame``, ver "Known limits" del README) y por eso
+    mismo importa: el README apunta al lector hacia cablear esa pantalla, y
+    hacerlo sin esta linea no deja una pantalla incompleta -- deja un
+    sistema que mide mal en silencio.
+    """
+    old_intrinsics = _intrinsics(rms_px=0.21)
+    pipeline = _IntrinsicsHoldingPipeline(old_intrinsics)
+    window = MainWindow(intrinsics=old_intrinsics, pipeline=pipeline)
+    qtbot.addWidget(window)
+
+    # Misma resolucion, otra calibracion: ``require_compatible`` no puede
+    # detectar la diferencia, solo la propagacion correcta puede.
+    new_intrinsics = _intrinsics(rms_px=0.33)
+    window.load_intrinsics(new_intrinsics)
+
+    assert pipeline.intrinsics is new_intrinsics, (
+        "el pipeline siguio corrigiendo distorsion con los intrinsecos viejos"
+    )
+    assert "0.33" in window.status_text()
+
+    window.close()
+
+
+# ---------------------------------------------------------------------------
+# I8 -- el tercer campo de la barra de estado es una medida, no una constante
+# ---------------------------------------------------------------------------
+
+
+def test_status_bar_shows_the_measured_residual_not_the_configured_scale(qtbot):
+    """I8: el tercer campo mostraba ``plane.mm_per_px``, que
+    ``compute_plane_calibration`` copia literalmente de
+    ``cfg.canvas_mm_per_px``: imprimia "0.200 mm/px" para siempre y no podia
+    indicar salud, aunque el README lo llamara "la escala en vivo". Una
+    constante disfrazada de lectura en vivo es, en un instrumento de
+    medicion, peor que no mostrar nada.
+
+    La implementacion equivocada que esta prueba RECHAZA: la anterior. Los
+    dos planos de abajo comparten ``mm_per_px`` EXACTAMENTE (0.2, como en el
+    rig real) y difieren solo en el residual, asi que la version vieja
+    imprimia el mismo texto para los dos y no podria distinguirlos.
+    """
+    window = MainWindow(intrinsics=_intrinsics())
+    qtbot.addWidget(window)
+
+    window.update_frame_result(
+        _frame_result(rectified=_frame(900, 600), plane=_plane(mm_per_px=0.2, residual_mm=0.183))
+    )
+    healthy_text = window.status_text()
+    assert "0.183" in healthy_text
+    assert window.status_is_warning() is False
+
+    window.update_frame_result(
+        _frame_result(rectified=_frame(900, 600), plane=_plane(mm_per_px=0.2, residual_mm=2.400))
+    )
+    degraded_text = window.status_text()
+
+    assert "2.400" in degraded_text
+    assert degraded_text != healthy_text, (
+        "el campo tiene que cambiar con el residual medido, no con la escala configurada"
+    )
+    assert window.status_is_warning() is True, (
+        f"un residual de 2.4 mm esta por encima de {RESIDUAL_WARN_MM} mm y tiene que avisar"
+    )
+
+
+def test_a_healthy_residual_just_below_the_threshold_does_not_warn(qtbot):
+    """El otro lado del umbral: "avisa cuando corresponde" vs. "avisa
+    siempre", la misma distincion que la Ruling 1 de la Task 18 ya exigio
+    para el aviso de calibracion."""
+    window = MainWindow(intrinsics=_intrinsics())
+    qtbot.addWidget(window)
+
+    window.update_frame_result(
+        _frame_result(
+            rectified=_frame(900, 600),
+            plane=_plane(residual_mm=RESIDUAL_WARN_MM - 0.001),
+        )
+    )
+    assert window.status_is_warning() is False
+
+    window.update_frame_result(
+        _frame_result(rectified=_frame(900, 600), plane=_plane(residual_mm=RESIDUAL_WARN_MM))
+    )
+    assert window.status_is_warning() is True

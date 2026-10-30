@@ -23,6 +23,25 @@ Dos decisiones de la encargante gobiernan este modulo:
    ``set_frame`` muestra el cuadro crudo como area PRINCIPAL en vez de
    dejar la ventana en negro o lanzar, con un aviso dibujado sobre el
    mismo cuadro para que quede claro que no es la vista rectificada.
+
+Dos capas, dos relojes (ronda de correcciones finales, C1)
+-----------------------------------------------------------
+La vista mantiene las dos capas SEPARADAS -- el lienzo rectificado y el
+cuadro crudo -- porque no llegan al mismo ritmo. El crudo llega a la
+cadencia de la CAMARA (``MainWindow._on_camera_frame``, un cuadro cada
+~33 ms); el lienzo rectificado llega a la cadencia del PIPELINE
+(``update_frame_result``, 3-10 por segundo en CPU). La version anterior
+tenia una sola entrada (``set_frame``) que reconstruia ambas capas de una
+vez, asi que la unica forma de refrescar el crudo era volver a entregar
+tambien un lienzo -- y por eso ``MainWindow`` solo podia pintar cuando el
+pipeline terminaba: el video entero corria al ritmo de la medicion.
+
+Con ``set_raw_frame`` y ``set_rectified_frame`` separadas, el PiP crudo se
+mueve a la cadencia de la camara y el lienzo a la del pipeline, sin que
+uno pise al otro. ``set_raw_frame`` solo reconstruye el area PRINCIPAL
+cuando no hay lienzo rectificado que mostrar (el camino de respaldo de la
+Ruling 2): con un lienzo presente, reconvertirlo a ``QPixmap`` en cada
+cuadro de camara seria trabajo puro sin ningun pixel nuevo.
 """
 
 from __future__ import annotations
@@ -30,14 +49,11 @@ from __future__ import annotations
 import cv2
 import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import QWidget
 
-#: Color de fondo del area de video: un grafito frio, deliberadamente
-#: distinto del "casi negro" generico (#111/#0B0B0B) -- ver la paleta del
-#: informe de la tarea. Mantiene el video, no el chrome, como lo mas
-#: brillante del cuadro.
-_BACKGROUND_HEX = "#171B20"
+from codex_caliper.ui.imaging import bgr_to_qpixmap
+from codex_caliper.ui.theme import BG_VOID_HEX
 
 #: Fraccion del ancho nativo del cuadro crudo que ocupa el PiP.
 PIP_SCALE = 0.25
@@ -58,21 +74,6 @@ _FONT = cv2.FONT_HERSHEY_SIMPLEX
 _FONT_SCALE = 0.7
 _BANNER_ORIGIN = (16, 36)
 _BANNER_COLOR_BGR = (60, 170, 217)  # ambar/acero, coherente con el aviso de la barra de estado
-
-
-def _ndarray_bgr_to_qpixmap(frame: np.ndarray) -> QPixmap:
-    """Convierte un arreglo BGR de OpenCV a ``QPixmap``.
-
-    ``QImage.copy()`` es obligatorio: el buffer de ``frame`` es un arreglo
-    de numpy local a esta funcion, y sin copiar el ``QImage`` quedaria
-    apuntando a memoria que puede liberarse en cuanto ``frame`` sale de
-    alcance -- un pixmap corrupto sin ninguna excepcion que lo delate.
-    """
-    frame = np.ascontiguousarray(frame)
-    height, width = frame.shape[:2]
-    bytes_per_line = frame.strides[0]
-    image = QImage(frame.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
-    return QPixmap.fromImage(image.copy())
 
 
 def _downscale_for_pip(frame: np.ndarray, *, scale: float = PIP_SCALE, min_width_px: int = PIP_MIN_WIDTH_PX) -> np.ndarray:
@@ -114,10 +115,12 @@ class VideoView(QWidget):
         self.main_pixmap = QPixmap()
         self.pip_pixmap = QPixmap()
         self.is_showing_raw_fallback = False
+        self._rectified_pixmap: QPixmap | None = None
+        self._raw_frame: np.ndarray | None = None
 
         self.setAutoFillBackground(True)
         palette = self.palette()
-        palette.setColor(QPalette.ColorRole.Window, QColor(_BACKGROUND_HEX))
+        palette.setColor(QPalette.ColorRole.Window, QColor(BG_VOID_HEX))
         self.setPalette(palette)
 
     @property
@@ -136,7 +139,7 @@ class VideoView(QWidget):
         self.update()
 
     def set_frame(self, rectified: np.ndarray | None, raw_frame: np.ndarray) -> None:
-        """Actualiza los pixeles a mostrar a partir de un cuadro del pipeline.
+        """Actualiza las DOS capas de una vez, a partir de un cuadro del pipeline.
 
         ``rectified`` puede ser ``None`` (calibracion ``BLOCKED``, Task 14);
         en ese caso el area principal muestra ``raw_frame`` con un aviso
@@ -145,13 +148,55 @@ class VideoView(QWidget):
         "el crudo como PiP en la esquina"), independientemente de si
         tambien es lo que se usa como area principal.
         """
-        self.is_showing_raw_fallback = rectified is None
-        main_source = raw_frame if rectified is None else rectified
-        main_image = _draw_fallback_banner(main_source, RAW_FALLBACK_TEXT) if self.is_showing_raw_fallback else main_source
-
-        self.main_pixmap = _ndarray_bgr_to_qpixmap(main_image)
-        self.pip_pixmap = _ndarray_bgr_to_qpixmap(_downscale_for_pip(raw_frame))
+        self._store_rectified(rectified)
+        self._store_raw(raw_frame)
+        self._refresh_main_pixmap()
         self.update()
+
+    def set_raw_frame(self, raw_frame: np.ndarray) -> None:
+        """Refresca SOLO la capa cruda (el PiP), a la cadencia de la camara.
+
+        Es la via que usa ``MainWindow._on_camera_frame`` en cada cuadro que
+        entrega la camara, sin esperar al pipeline. El area principal se
+        reconstruye unicamente si no hay lienzo rectificado vigente: en ese
+        caso el crudo ES el area principal (camino de respaldo de la Ruling
+        2) y tiene que moverse; con un lienzo presente, reconvertirlo en
+        cada cuadro de camara seria trabajo sin ningun pixel nuevo.
+        """
+        self._store_raw(raw_frame)
+        if self._rectified_pixmap is None:
+            self._refresh_main_pixmap()
+        self.update()
+
+    def set_rectified_frame(self, rectified: np.ndarray | None) -> None:
+        """Refresca SOLO la capa rectificada, a la cadencia del pipeline.
+
+        ``None`` la DESCARTA (calibracion ``BLOCKED``): el area principal
+        pasa al camino de respaldo y desde ese momento sigue a la camara,
+        en vez de congelarse en el ultimo lienzo valido -- que es lo que
+        haria si un ``None`` simplemente se ignorara.
+        """
+        self._store_rectified(rectified)
+        self._refresh_main_pixmap()
+        self.update()
+
+    def _store_rectified(self, rectified: np.ndarray | None) -> None:
+        self._rectified_pixmap = None if rectified is None else bgr_to_qpixmap(rectified)
+
+    def _store_raw(self, raw_frame: np.ndarray) -> None:
+        self._raw_frame = raw_frame
+        self.pip_pixmap = bgr_to_qpixmap(_downscale_for_pip(raw_frame))
+
+    def _refresh_main_pixmap(self) -> None:
+        """Recompone el area principal: el lienzo si existe, el crudo con su
+        aviso si no."""
+        self.is_showing_raw_fallback = self._rectified_pixmap is None
+        if self._rectified_pixmap is not None:
+            self.main_pixmap = self._rectified_pixmap
+        elif self._raw_frame is not None:
+            self.main_pixmap = bgr_to_qpixmap(
+                _draw_fallback_banner(self._raw_frame, RAW_FALLBACK_TEXT)
+            )
 
     def paintEvent(self, event) -> None:  # noqa: D102 - override de Qt
         painter = QPainter(self)

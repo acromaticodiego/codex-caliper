@@ -88,30 +88,40 @@ from PySide6.QtWidgets import (
 from codex_caliper.aruco_tools import CalibrationState
 from codex_caliper.camera import CameraThread
 from codex_caliper.config import AppConfig
+from codex_caliper.homography import DegenerateMarkerLayout
 from codex_caliper.intrinsics import Intrinsics, IntrinsicsMismatch
 from codex_caliper.pipeline import MARKER_COUNT, FrameResult, Pipeline
 from codex_caliper.ui.calibration_view import IntrinsicCalibrationView, PlaneCalibrationView
 from codex_caliper.ui.overlay import draw_results
 from codex_caliper.ui.side_panel import SidePanel
+from codex_caliper.ui.theme import (
+    BG_VOID_HEX,
+    INK_PRIMARY_HEX,
+    RULE_HEX,
+    SIGNAL_WARN_HEX,
+    SURFACE_HEX,
+)
 from codex_caliper.ui.validation_view import ValidationView
 from codex_caliper.ui.video_view import VideoView
 from codex_caliper.validation import ValidationLog
 
-# Paleta: instrumento de medicion, no tablero SaaS -- mismos tokens que
-# ``video_view.py``/``side_panel.py``. Ver el informe de la tarea para la
-# justificacion completa (por que NO es el fondo "#111" generico, por que
-# los colores de senal son desaturados, etc.).
-_BG_VOID_HEX = "#171B20"
-_SURFACE_HEX = "#1D2227"
-_RULE_HEX = "#333A42"
-_INK_PRIMARY_HEX = "#E7EAED"
-_SIGNAL_WARN_HEX = "#D9A54B"
-
-#: Escala del lienzo usada para el panel lateral cuando no hay calibracion
-#: de plano (ver docstring de ``_DEFAULT_MM_PER_PX`` en ``side_panel.py``).
-_DEFAULT_MM_PER_PX = 0.2
-
 _STATUS_BAR_HEIGHT_PX = 30
+
+#: Alto de la linea de avisos de operacion, debajo del video.
+_NOTICE_BAR_HEIGHT_PX = 26
+
+#: Separador entre varios avisos en la misma linea.
+_NOTICE_SEPARATOR = "   •   "
+
+#: Residual de reproyeccion, en mm, a partir del cual la barra de estado
+#: avisa.
+#:
+#: Es el mismo numero que la lista de verificacion de hardware del README
+#: declara como objetivo ("Homography reprojection residual below 1 mm"), no
+#: un umbral nuevo inventado aqui. Sin un umbral, el campo volveria a ser un
+#: numero que no puede indicar salud -- exactamente el defecto que reemplazar
+#: ``mm_per_px`` por ``residual_mm`` existe para cerrar.
+RESIDUAL_WARN_MM = 1.0
 
 _CHECK = "✓"  # ✓ -- Qt renderiza Unicode real, a diferencia de cv2.putText (ver overlay.py)
 _CROSS = "✗"  # ✗
@@ -144,6 +154,14 @@ class _PipelineWorker(QObject):
 
     result_ready = Signal(object)
 
+    #: Emitida cuando ``Pipeline.process`` lanza una de las DOS excepciones
+    #: que su propio docstring declara (ver ``process_frame``). Lleva el
+    #: mensaje ya redactado y una bandera que dice si es un problema de
+    #: resolucion/intrinsecos (``True``) o de la config del montaje
+    #: (``False``) -- los dos se bloquean, pero solo el primero se puede
+    #: deshacer cargando una calibracion nueva.
+    pipeline_failed = Signal(str, bool)
+
     def __init__(self, pipeline: Pipeline) -> None:
         super().__init__()
         self._pipeline = pipeline
@@ -154,8 +172,34 @@ class _PipelineWorker(QObject):
         Este metodo corre en el hilo del worker (por la afinidad que le dio
         ``moveToThread``), nunca en el de la GUI -- es la pieza central de
         la Ruling 4 del encargo.
+
+        Captura las DOS excepciones que ``Pipeline.process`` DOCUMENTA que
+        puede lanzar, y nada mas (ronda de correcciones finales, I5). Sin
+        esto, un ``marker_layout`` colineal -- un error de tipeo en la
+        config que pasa la validacion de arranque -- imprimia un traceback
+        por CADA cuadro en la consola, con el video congelado y la barra de
+        estado en verde: el contrato "nunca un traceback" del punto de
+        entrada valia solo hasta que existia una ventana.
+
+        NO es un ``except Exception``: un error de programacion aguas
+        arriba tiene que verse. Este proyecto ya pago por un except ciego
+        (Task 8, ``np.trapezoid`` devolviendo ``None`` para siempre en
+        silencio), y ``pipeline.py`` deja propagar a proposito todo lo que
+        no este en esta lista.
         """
-        result = self._pipeline.process(frame)
+        try:
+            result = self._pipeline.process(frame)
+        except IntrinsicsMismatch as exc:
+            self.pipeline_failed.emit(str(exc), True)
+            return
+        except DegenerateMarkerLayout as exc:
+            self.pipeline_failed.emit(
+                "Measurement stopped: the configured marker_layout is degenerate "
+                f"(collinear or coincident marker positions), so no homography can be "
+                f"fitted to it. Fix marker_layout in the config file and restart. ({exc})",
+                False,
+            )
+            return
         self.result_ready.emit(result)
 
 
@@ -200,16 +244,34 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("codex-caliper")
 
         self._intrinsics = intrinsics
+        self._pipeline = pipeline
         self._plane = None
         self._camera_error: str | None = None
         self._resolution_blocked_reason: str | None = None
+        self._config_error: str | None = None
         self._resolution_checked = False
         self._camera_thread: CameraThread | None = None
         self._worker_thread: QThread | None = None
         self._worker: _PipelineWorker | None = None
         self._status_text = ""
         self._status_warning = False
+        self._notice_text = ""
         self._cfg = cfg if cfg is not None else AppConfig(marker_thickness_mm=0.0)
+
+        # -- Contrapresion de un solo cuadro en vuelo (C1) -------------------
+        #
+        # ``_pipeline_busy`` es ``True`` desde que un cuadro se entrega al
+        # worker hasta que su resultado (o su fallo) vuelve. Mientras lo
+        # este, un cuadro nuevo NO se encola: SOBRESCRIBE
+        # ``_pending_frame``. Ver ``submit_frame`` para por que.
+        self._pipeline_busy = False
+        self._pending_frame: np.ndarray | None = None
+
+        #: Cuantos cuadros se descartaron por llegar con el pipeline ocupado.
+        #: Es el unico testigo observable de que la contrapresion existe --
+        #: una implementacion sin ella deja este contador en cero y entrega
+        #: TODOS los cuadros al worker.
+        self.dropped_frame_count = 0
 
         self.video_view = VideoView()
         self.side_panel = SidePanel()
@@ -226,7 +288,7 @@ class MainWindow(QMainWindow):
         status_bar_widget = QWidget()
         status_bar_widget.setFixedHeight(_STATUS_BAR_HEIGHT_PX)
         status_bar_widget.setStyleSheet(
-            f"background-color: {_SURFACE_HEX}; border-bottom: 1px solid {_RULE_HEX};"
+            f"background-color: {SURFACE_HEX}; border-bottom: 1px solid {RULE_HEX};"
         )
         status_layout = QHBoxLayout(status_bar_widget)
         status_layout.setContentsMargins(12, 0, 12, 0)
@@ -235,13 +297,52 @@ class MainWindow(QMainWindow):
         status_layout.addStretch(1)
         self._status_bar_widget = status_bar_widget
 
+        # -- Linea de avisos de operacion (C2) --------------------------------
+        #
+        # ``FrameResult.warnings`` no tenia NINGUN consumidor: el pipeline
+        # escribe ahi cinco mensajes distintos para el operador -- entre
+        # ellos "Separate them on the tray." -- y ninguno podia verse. La
+        # spec S7 etapa 4 no lo deja opcional: con dos mascaras fusionadas
+        # el sistema tiene que negarse A MEDIR *y mostrar el aviso*, porque
+        # "una medida falsa es peor que ninguna". Sin este canal, el caso
+        # normal de dos bananos pegados se veia como "No fruit detected" en
+        # el panel y una barra de estado perfectamente sana.
+        #
+        # Por que una linea PROPIA y no la barra de estado: esa barra es un
+        # readout de instrumento de tres campos de ancho fijo cuya forma la
+        # fija el mockup de la spec S8 (y la fijan sus pruebas). Meter ahi
+        # un mensaje de longitud variable -- "Fruits 3 and 7 are closer
+        # than 2.0 mm, so they cannot be measured separately. Separate them
+        # on the tray." -- empuja los tres campos y los recorta. Esta linea
+        # va pegada DEBAJO del video, que es donde la mirada del operador
+        # ya esta (spec S8: el video es lo que vende), crece para varios
+        # avisos a la vez, y desaparece cuando no hay ninguno en vez de
+        # dejar un hueco permanente.
+        self._notice_label = QLabel()
+        self._notice_label.setFont(QFont("Segoe UI", 9))
+        self._notice_label.setWordWrap(False)
+        self._notice_label.setStyleSheet(f"color: {SIGNAL_WARN_HEX};")
+        notice_bar = QWidget()
+        notice_bar.setFixedHeight(_NOTICE_BAR_HEIGHT_PX)
+        notice_bar.setStyleSheet(
+            f"background-color: {SURFACE_HEX}; border-top: 1px solid {RULE_HEX};"
+        )
+        notice_layout = QHBoxLayout(notice_bar)
+        notice_layout.setContentsMargins(12, 0, 12, 0)
+        notice_layout.setSpacing(0)
+        notice_layout.addWidget(self._notice_label)
+        notice_layout.addStretch(1)
+        self._notice_bar = notice_bar
+        notice_bar.setVisible(False)
+
         outer = QWidget()
-        outer.setStyleSheet(f"background-color: {_BG_VOID_HEX};")
+        outer.setStyleSheet(f"background-color: {BG_VOID_HEX};")
         outer_layout = QVBoxLayout(outer)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
         outer_layout.addWidget(status_bar_widget)
         outer_layout.addWidget(content, 1)
+        outer_layout.addWidget(notice_bar)
 
         # -- Navegacion entre vistas (Task 19, spec S8) -----------------------
         #
@@ -277,7 +378,7 @@ class MainWindow(QMainWindow):
         self._nav_buttons: dict[str, QPushButton] = {}
         nav_bar = QWidget()
         nav_bar.setFixedHeight(_NAV_BAR_HEIGHT_PX)
-        nav_bar.setStyleSheet(f"background-color: {_SURFACE_HEX}; border-bottom: 1px solid {_RULE_HEX};")
+        nav_bar.setStyleSheet(f"background-color: {SURFACE_HEX}; border-bottom: 1px solid {RULE_HEX};")
         nav_layout = QHBoxLayout(nav_bar)
         nav_layout.setContentsMargins(8, 0, 8, 0)
         nav_layout.setSpacing(4)
@@ -311,6 +412,7 @@ class MainWindow(QMainWindow):
             # Qt.QueuedConnection a mano.
             self._frame_submitted.connect(self._worker.process_frame)
             self._worker.result_ready.connect(self.update_frame_result)
+            self._worker.pipeline_failed.connect(self.on_pipeline_failed)
 
         self._refresh_status()
 
@@ -341,8 +443,53 @@ class MainWindow(QMainWindow):
         ``_PipelineWorker.process_frame``, en su propio hilo (Ruling 4).
         Sin un ``pipeline`` configurado no hay nada conectado del otro
         lado -- la senal se emite igual, sin efecto, en vez de lanzar.
+
+        Contrapresion: UN SOLO cuadro en vuelo (C1)
+        --------------------------------------------
+        La conexion al worker es encolada por Qt (afinidad de hilo
+        distinta) y esa cola NO tiene tope. La version anterior emitia por
+        cada cuadro de camara: a 30 cuadros/s de entrada contra 3-10
+        cuadros/s de rendimiento real del pipeline en CPU, se acumulaban
+        ~25 cuadros por segundo de ~6.2 MB cada uno (~155 MB/s) y la
+        memoria del proceso se agotaba en 30-60 segundos. No es una
+        degradacion: es una caida, y ocurre dentro del primer minuto de la
+        unica demostracion que el proyecto publica (spec S13, punto 1).
+
+        Mientras el worker esta ocupado, un cuadro nuevo SOBRESCRIBE al
+        pendiente en vez de encolarse. Eso es lo correcto y no solo lo
+        barato: para medir fruta quieta sobre una bandeja, el cuadro util
+        es el MAS RECIENTE -- procesar una cola atrasada entrega medidas
+        de hace varios segundos sobre una escena que ya cambio.
+
+        La bandera solo se levanta si hay un worker conectado: sin
+        pipeline nadie emitiria ``result_ready`` para bajarla otra vez, y
+        la primera llamada dejaria la ventana sorda para siempre.
         """
+        if self._worker is None:
+            self._frame_submitted.emit(frame)
+            return
+        if self._pipeline_busy:
+            if self._pending_frame is not None:
+                self.dropped_frame_count += 1
+            self._pending_frame = frame
+            return
+        self._pipeline_busy = True
+        self._pending_frame = None
         self._frame_submitted.emit(frame)
+
+    def _release_pipeline(self) -> None:
+        """Baja la bandera de ocupado y entrega el cuadro pendiente, si hay.
+
+        Lo llaman los DOS caminos de retorno del worker
+        (``update_frame_result`` y ``on_pipeline_failed``): si solo lo
+        hiciera el camino feliz, una excepcion del pipeline dejaria la
+        bandera arriba y la ventana no volveria a entregar ni un cuadro.
+        """
+        self._pipeline_busy = False
+        pending = self._pending_frame
+        self._pending_frame = None
+        if pending is not None and self.measurement_enabled:
+            self.submit_frame(pending)
 
     def connect_camera(self, camera_thread: CameraThread) -> None:
         """Conecta un ``CameraThread`` real (Task 16) a esta ventana.
@@ -362,8 +509,28 @@ class MainWindow(QMainWindow):
 
     def _on_camera_frame(self, frame: np.ndarray) -> None:
         """Slot de ``CameraThread.frame_ready``: verifica resolucion una sola
-        vez y despues reenvia a ``submit_frame`` mientras la medicion no
-        este bloqueada (Ruling 3)."""
+        vez, PINTA el cuadro crudo y despues lo entrega a ``submit_frame``
+        mientras la medicion no este bloqueada (Ruling 3).
+
+        El video se refresca desde AQUI, en cada cuadro de camara (C1)
+        ---------------------------------------------------------------
+        La version anterior solo tocaba ``video_view`` en este slot cuando
+        la medicion estaba BLOQUEADA; con la medicion activa, la unica via
+        de pintura era ``update_frame_result`` -- o sea que la cadencia del
+        video ERA la cadencia del pipeline (3-10/s en CPU), no la de la
+        camara. ``set_raw_frame`` es la capa que puede ir al ritmo de la
+        camara sin pagar nada del pipeline: el PiP crudo se mueve siempre,
+        y cuando no hay lienzo rectificado vigente (calibracion BLOCKED, o
+        medicion bloqueada) el area principal tambien.
+
+        Lo que esta linea NO arregla, y hay que decirlo: el LIENZO
+        rectificado sigue llegando a la cadencia del pipeline. Rectificarlo
+        aqui exigiria ademas corregir distorsion en el hilo de la GUI (18
+        ms por cuadro a 1080p con ``cv2.undistort``, medido en esta
+        maquina), que es justamente lo que la Ruling 4 saco de este hilo.
+        El README se corrigio para decir lo que de verdad se mueve a la
+        cadencia de la camara, en vez de afirmar lo contrario.
+        """
         if not self._resolution_checked:
             self._resolution_checked = True
             if self._intrinsics is not None and self._camera_thread is not None:
@@ -373,14 +540,18 @@ class MainWindow(QMainWindow):
                     self._resolution_blocked_reason = str(exc)
                     self._refresh_status()
 
+        self.video_view.set_raw_frame(frame)
+
         if not self.measurement_enabled:
             # Finding 2 (ronda de revision 1): la camara sigue entregando
             # cuadros aunque la medicion este bloqueada (sin intrinsecos
             # todavia, o resolucion no compatible) -- eso no puede congelar
-            # el video. ``rectified=None`` reusa el mismo camino de
+            # el video. Descartar el lienzo reusa el mismo camino de
             # respaldo que la Ruling 2 le dio a ``VideoView`` para el
-            # cuadro BLOCKED del pipeline: mostrar el crudo en vez de nada.
-            self.video_view.set_frame(None, frame)
+            # cuadro BLOCKED del pipeline: mostrar el crudo en vez de nada,
+            # y mostrarlo MOVIENDOSE.
+            self.video_view.set_rectified_frame(None)
+            self._set_notices([self.blocked_reason()])
             return
         self.submit_frame(frame)
 
@@ -405,29 +576,112 @@ class MainWindow(QMainWindow):
         aplica AQUI, sobre el lienzo, antes de entregarselo a
         ``VideoView`` -- sin esto las cotas solo vivian en las tarjetas del
         panel y el video, que es lo que la spec S8 dice que "vende", quedaba
-        decorativo. Se usa ``result.plane.mm_per_px`` (la escala REAL de
-        esta calibracion) en vez de la constante del modulo siempre que hay
-        un plano -- ``draw_results``/``format_measurement`` ya distinguen
-        ese piso de incertidumbre del default generico (ver ``overlay.py``).
+        decorativo. Se usa ``result.plane.mm_per_px``, la escala REAL de
+        esta calibracion.
+
+        Ya no hay un default de 0.2 mm/px para el caso sin plano (ronda de
+        correcciones finales): era codigo muerto demostrable -- el pipeline
+        devuelve ``results`` VACIO en todo cuadro sin plano, asi que no
+        habia nada que formatear con el -- y un default plausible en el
+        camino de la escala es una invitacion a medir con una escala que
+        nadie calibro.
+
+        ``result.warnings`` se enruta a la linea de avisos (C2). Era el
+        unico campo de ``FrameResult`` sin ningun consumidor en todo el
+        proyecto, con cinco mensajes distintos de operador escritos ahi.
         """
         self._plane = result.plane
-        mm_per_px = result.plane.mm_per_px if result.plane is not None else _DEFAULT_MM_PER_PX
+        mm_per_px = result.plane.mm_per_px if result.plane is not None else None
 
         rectified = result.rectified
-        if rectified is not None:
+        if rectified is not None and mm_per_px is not None:
             rectified = draw_results(rectified, result.results, mm_per_px)
 
-        self.video_view.set_frame(rectified, result.raw_undistorted)
+        self.video_view.set_rectified_frame(rectified)
+        self.video_view.set_raw_frame(result.raw_undistorted)
         self.side_panel.update_results(result.results, mm_per_px)
+        self._set_notices(result.warnings)
         self._refresh_status()
+        self._release_pipeline()
+
+    def on_pipeline_failed(self, message: str, is_resolution_problem: bool) -> None:
+        """Slot de ``_PipelineWorker.pipeline_failed`` (I5).
+
+        Las dos excepciones que ``Pipeline.process`` documenta son errores
+        de CONFIGURACION que no se arreglan en el cuadro siguiente, asi que
+        no basta con mostrar el mensaje una vez: la medicion se BLOQUEA,
+        igual que ya hacia la guardia de resolucion. Sin ese bloqueo, el
+        cuadro pendiente se volveria a entregar, volveria a fallar, y la
+        ventana quedaria girando sobre el mismo error un cuadro a la vez.
+
+        El problema de resolucion se guarda en ``_resolution_blocked_reason``
+        -- el mismo campo que la guardia de ``actual_size``, misma causa y
+        mismo mensaje -- para que ``load_intrinsics`` lo limpie igual que
+        limpia el otro. El layout degenerado va a ``_config_error``, que
+        NADIE limpia: ninguna calibracion nueva arregla una config
+        colineal.
+        """
+        if is_resolution_problem:
+            self._resolution_blocked_reason = message
+        else:
+            self._config_error = message
+        self._set_notices([message])
+        self._refresh_status()
+        self._release_pipeline()
+
+    # -- Avisos de operacion (C2) ---------------------------------------------
+
+    def notice_text(self) -> str:
+        """Los avisos de operacion que la interfaz esta mostrando ahora
+        mismo, en ingles, exactamente como los lee el operador. Cadena
+        vacia si no hay ninguno."""
+        return self._notice_text
+
+    def _set_notices(self, messages: list[str]) -> None:
+        texts = [message for message in messages if message]
+        self._notice_text = _NOTICE_SEPARATOR.join(texts)
+        self._notice_label.setText(self._notice_text)
+        # Sin avisos la linea se esconde entera, en vez de dejar una franja
+        # vacia permanente robandole alto al video (spec S8).
+        self._notice_bar.setVisible(bool(texts))
 
     # -- Calibracion / bloqueo de medicion -----------------------------------
 
     def load_intrinsics(self, intrinsics: Intrinsics | None) -> None:
-        """Reemplaza los intrinsecos activos (Task 19 los llamara con un
-        resultado real de calibracion). Vuelve a verificar la resolucion
-        del cuadro siguiente en vez de confiar en una verificacion vieja."""
+        """Reemplaza los intrinsecos activos Y los del pipeline.
+
+        Vuelve a verificar la resolucion del cuadro siguiente en vez de
+        confiar en una verificacion vieja.
+
+        Propagar al pipeline no es opcional (I4)
+        ----------------------------------------
+        ``Pipeline`` guarda su PROPIA referencia a los intrinsecos y la usa
+        para ``undistort`` en cada cuadro. La version anterior actualizaba
+        solo la de la ventana, asi que la barra de estado habria mostrado
+        el RMS de la calibracion NUEVA mientras cada medida se seguia
+        corrigiendo con la VIEJA -- en verde, sin ningun aviso. Es la
+        corrupcion silenciosa que ``require_compatible`` existe para
+        evitar, por un camino que esa guardia no cubre: dos calibraciones
+        de la MISMA resolucion y distinta distorsion pasan la guardia sin
+        objetar nada.
+
+        Hoy es inalcanzable (nadie llama a ``set_live_frame``, ver "Known
+        limits" del README), y por eso mismo se arregla ahora: el README
+        apunta al lector hacia "cablear la pantalla de calibracion" como
+        la tarea pendiente, y hacerlo sin esta linea no deja una pantalla
+        incompleta -- deja un sistema que mide mal en silencio.
+
+        El cambio es un reemplazo de referencia desde el hilo de la GUI
+        mientras el worker puede estar leyendola: atomico bajo el GIL, y
+        el peor caso es que el cuadro en vuelo (hay a lo sumo UNO, ver
+        ``submit_frame``) se corrija con los intrinsecos anteriores. Si la
+        resolucion no corresponde, ``undistort`` lanza
+        ``IntrinsicsMismatch`` y ``on_pipeline_failed`` lo bloquea -- el
+        mismo desenlace que la guardia de ``actual_size``, no uno nuevo.
+        """
         self._intrinsics = intrinsics
+        if self._pipeline is not None and intrinsics is not None:
+            self._pipeline.intrinsics = intrinsics
         self._resolution_checked = False
         self._resolution_blocked_reason = None
         self._refresh_status()
@@ -435,8 +689,15 @@ class MainWindow(QMainWindow):
     @property
     def measurement_enabled(self) -> bool:
         """``False`` mientras falte una calibracion valida para la resolucion
-        real de la camara, o mientras la camara este perdida (Ruling 3)."""
-        return not (self._camera_error or self._resolution_blocked_reason or self._intrinsics is None)
+        real de la camara, mientras la camara este perdida (Ruling 3), o
+        mientras el pipeline haya fallado por un error de configuracion
+        que no se arregla solo (I5)."""
+        return not (
+            self._camera_error
+            or self._config_error
+            or self._resolution_blocked_reason
+            or self._intrinsics is None
+        )
 
     def blocked_reason(self) -> str:
         """Por que ``measurement_enabled`` es ``False`` en este momento, en
@@ -444,6 +705,8 @@ class MainWindow(QMainWindow):
         bloqueado."""
         if self._camera_error:
             return f"Measurement is blocked: {self._camera_error}"
+        if self._config_error:
+            return self._config_error
         if self._resolution_blocked_reason:
             return f"Measurement is blocked: {self._resolution_blocked_reason}"
         if self._intrinsics is None:
@@ -469,21 +732,23 @@ class MainWindow(QMainWindow):
         self._status_text = text
         self._status_warning = warning
         self._status_label.setText(text)
-        color = _SIGNAL_WARN_HEX if warning else _INK_PRIMARY_HEX
+        color = SIGNAL_WARN_HEX if warning else INK_PRIMARY_HEX
         self._status_label.setStyleSheet(f"color: {color};")
 
     def _compute_status(self) -> tuple[str, bool]:
         if self._camera_error:
             return f"{_CROSS} Camera error: {self._camera_error}", True
+        if self._config_error:
+            return f"{_CROSS} {self._config_error}", True
         if self._resolution_blocked_reason:
             return f"{_CROSS} {self._resolution_blocked_reason}", True
 
         intrinsics_text, intrinsics_warning = self._intrinsics_segment()
         markers_text, markers_warning = self._markers_segment()
-        scale_text = self._scale_segment()
+        residual_text, residual_warning = self._residual_segment()
 
-        text = intrinsics_text + _SEPARATOR + markers_text + _SEPARATOR + scale_text
-        return text, intrinsics_warning or markers_warning
+        text = intrinsics_text + _SEPARATOR + markers_text + _SEPARATOR + residual_text
+        return text, intrinsics_warning or markers_warning or residual_warning
 
     def _intrinsics_segment(self) -> tuple[str, bool]:
         if self._intrinsics is None:
@@ -513,10 +778,38 @@ class MainWindow(QMainWindow):
             return f"{_WARN} 3/{MARKER_COUNT} markers", True
         return f"{_CHECK} {MARKER_COUNT}/{MARKER_COUNT} markers", False
 
-    def _scale_segment(self) -> str:
+    def _residual_segment(self) -> tuple[str, bool]:
+        """Tercer campo de la barra de estado: el residual de reproyeccion
+        de la homografia de ESTE cuadro, en mm (I8).
+
+        Antes el campo mostraba ``plane.mm_per_px``, que
+        ``compute_plane_calibration`` copia literalmente de
+        ``cfg.canvas_mm_per_px``: imprimia "0.200 mm/px" para siempre, no
+        podia indicar salud, y el README lo llamaba "la escala en vivo".
+        Una constante disfrazada de lectura en vivo es, en un instrumento
+        de medicion, peor que no mostrar nada -- da la impresion de un
+        chequeo que no existe.
+
+        ``residual_mm`` SI se mide en cada cuadro (el RMS del error de
+        reproyeccion de las 16 o 12 esquinas, Task 5), es el numero que la
+        spec S8 pide en esa barra, y es el que de verdad se puede ir a
+        mal: sube si alguien mueve un marcador, si el layout de la config
+        no corresponde al montaje, o si la deteccion de esquinas se
+        degrada. El mockup de la spec pone un valor MEDIDO en ese campo
+        ("0.183 mm/px"), no el parametro de configuracion.
+
+        Advertencia que hereda de Task 5 y que el README ya documenta: es
+        un RMS global, asi que atenua el error de UN marcador suelto
+        (~0.065 mm de residual por mm de desplazamiento). Un residual bajo
+        no descarta un marcador mal ubicado; uno alto si descarta que todo
+        este bien.
+        """
         if self._plane is None:
-            return "— mm/px"
-        return f"{self._plane.mm_per_px:.3f} mm/px"
+            return "— mm residual", False
+        residual_mm = self._plane.residual_mm
+        warning = residual_mm >= RESIDUAL_WARN_MM
+        mark = _WARN if warning else _CHECK
+        return f"{mark} {residual_mm:.3f} mm residual", warning
 
     # -- Eventos Qt -----------------------------------------------------------
 
