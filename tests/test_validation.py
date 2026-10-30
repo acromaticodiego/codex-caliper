@@ -122,6 +122,95 @@ def test_log_accumulates_over_a_fresh_instance_on_the_same_path(tmp_path):
     assert list(ValidationLog(path).to_frame()["sample_id"]) == ["s1", "s2"]
 
 
+def test_length_and_caliper_std_survive_the_csv_roundtrip_and_are_optional(tmp_path):
+    """I9 (ronda de correcciones finales): la tabla de validacion publicable
+    (spec S13, punto 4) mostraba longitud y calibre sin su desviacion -- la
+    unica cifra del sistema que no llevaba un ``±``. ``length_std_mm``/
+    ``caliper_std_mm`` tienen que sobrevivir el CSV (``record`` -> disco ->
+    ``ValidationLog`` nueva) para que ``ValidationView`` pueda mostrarlas, y
+    tienen que seguir siendo OPCIONALES: un llamador que no las pasa (como
+    ``test_log_roundtrips_through_csv`` arriba, o una muestra de patron
+    plano que no tiene una desviacion temporal que ofrecer) no debe producir
+    una fila invalida.
+
+    La implementacion equivocada que esta prueba RECHAZA: omitir los dos
+    parametros de ``record`` (o no escribirlos al CSV) -- ahi
+    ``"length_std_mm" in reloaded.columns`` seria falso en vez de sobrevivir
+    con el valor real o NaN.
+    """
+    path = tmp_path / "v.csv"
+    log = ValidationLog(path)
+    log.record(
+        "s1",
+        measures(length=180.3, caliper=36.1),
+        actual_weight_g=132.4,
+        length_std_mm=0.8,
+        caliper_std_mm=0.5,
+    )
+    log.record("s2", measures(length=150.0, caliper=28.0), actual_weight_g=95.0)
+    # sin std -- tiene que sobrevivir como NaN, no reventar ni quedar fuera
+    # de la columna.
+
+    reloaded = ValidationLog(path).to_frame()
+
+    assert reloaded.loc[0, "length_std_mm"] == pytest.approx(0.8)
+    assert reloaded.loc[0, "caliper_std_mm"] == pytest.approx(0.5)
+    assert pd.isna(reloaded.loc[1, "length_std_mm"])
+    assert pd.isna(reloaded.loc[1, "caliper_std_mm"])
+
+
+# ---------------------------------------------------------------------------
+# ValidationLog -- guardia contra un CSV vacio o mal formado (I12)
+# ---------------------------------------------------------------------------
+
+
+def test_log_treats_a_zero_byte_file_as_an_empty_log(tmp_path):
+    """I12 (ronda de correcciones finales): un archivo de 0 bytes (escritura
+    interrumpida -- corte de luz, cierre forzado a mitad del primer
+    ``record``) EXISTE pero no tiene ni encabezado. ``pd.read_csv`` lo
+    hace lanzar ``pandas.errors.EmptyDataError``; sin guardia, eso suben
+    como traceback crudo DESDE ``MainWindow.__init__``, en el peor momento
+    posible del arranque (ver ``test_main_reports_a_clear_error_when_the_validation_log_is_unparseable``
+    en ``test_entrypoint.py``).
+
+    La implementacion equivocada que esta prueba RECHAZA: no envolver
+    ``pd.read_csv`` en absoluto -- esa version lanza ``EmptyDataError`` en
+    vez de construir el log con cero filas.
+    """
+    path = tmp_path / "v.csv"
+    path.write_text("", encoding="utf-8")
+
+    log = ValidationLog(path)
+
+    assert len(log.to_frame()) == 0
+    # Y sigue siendo usable: grabar sobre el deja un CSV valido, no uno que
+    # perpetue el problema.
+    log.record("s1", measures(), actual_weight_g=120.0)
+    assert list(ValidationLog(path).to_frame()["sample_id"]) == ["s1"]
+
+
+def test_log_raises_a_clear_error_for_a_malformed_csv_instead_of_a_raw_parser_error(tmp_path):
+    """I12: un CSV mal formado (editado a mano, truncado a mitad de una
+    fila con una comilla sin cerrar) SI puede tener datos reales antes del
+    punto de ruptura -- a diferencia del caso vacio, descartarlos en
+    silencio seria la perdida silenciosa que este proyecto evita en otras
+    partes. Por eso esto se deja propagar, pero como ``ValueError`` con un
+    mensaje para el operador (que ``__main__._launch``, I12, enruta bajo
+    ``_StartupError``), no como el ``pandas.errors.ParserError`` crudo.
+
+    La implementacion equivocada que esta prueba RECHAZA: dejar que
+    ``pd.errors.ParserError`` se propague sin traducir -- esa excepcion no
+    es un ``ValueError`` (``pytest.raises(ValueError)`` no la atraparia) y
+    su mensaje no menciona la ruta del archivo.
+    """
+    path = tmp_path / "v.csv"
+    path.write_text('sample_id,codex_length_mm\n"unterminated quote,180.0\n', encoding="utf-8")
+
+    with pytest.raises(ValueError) as excinfo:
+        ValidationLog(path)
+    assert str(path) in str(excinfo.value)
+
+
 # ---------------------------------------------------------------------------
 # dimensional_check
 # ---------------------------------------------------------------------------

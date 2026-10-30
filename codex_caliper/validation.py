@@ -110,10 +110,25 @@ MIN_DENSITY_SAMPLES = 10
 
 #: Columnas del CSV de validacion, en el orden en que se escriben. Nombres
 #: en ingles: son encabezados de cara al usuario.
+#:
+#: ``length_std_mm``/``caliper_std_mm`` (ronda de correcciones finales, I9):
+#: la unica fila de este CSV que SI tiene una desviacion disponible es la
+#: que viene de un ``TrackAggregate`` asentado (``ValidationView.record_sample``,
+#: que trae ``length_std_mm``/``caliper_std_mm`` del agregado temporal,
+#: Task 11); una muestra de patron plano (``dimensional_check``) no pasa
+#: por ``ValidationLog.record`` en absoluto. Sin estas dos columnas, la
+#: tabla de validacion publicable (spec S13, punto 4) mostraba longitud y
+#: calibre SIN su incertidumbre -- el anti-objetivo exacto que
+#: ``format_measurement`` existe para cerrar en todos los demas caminos de
+#: la interfaz. Son OPCIONALES (``None`` -> NaN en el CSV) para que una
+#: fila sin desviacion (``ValidationLog.record`` llamado directo, como
+#: hacen las pruebas de este modulo) siga siendo un CSV valido.
 _COLUMNS = [
     "sample_id",
     "codex_length_mm",
+    "length_std_mm",
     "caliper_mm",
+    "caliper_std_mm",
     "area_mm2",
     "volume_mm3",
     "actual_weight_g",
@@ -170,14 +185,50 @@ class ValidationLog:
     el archivo existente si ya hay uno, para que retomar una sesion de
     validacion en curso acumule sobre las muestras anteriores en vez de
     perderlas.
+
+    Guardia contra un CSV vacio o mal formado (I12, ronda de correcciones
+    finales)
+    --------------------------------------------------------------------------
+    ``MainWindow.__init__`` construye un ``ValidationLog`` sobre el archivo
+    REAL del rig -- este constructor corre despues del sondeo de camara y
+    la carga de YOLO (varios segundos), el peor momento posible para un
+    traceback crudo. Dos formas conocidas de que ese archivo este roto sin
+    que ninguna muestra se haya perdido de verdad:
+
+    - **Vacio (0 bytes).** Una escritura interrumpida (corte de luz, cierre
+      forzado a mitad del primer ``record``) deja un archivo que EXISTE
+      pero no tiene ni encabezado. ``pd.read_csv`` lanza
+      ``pandas.errors.EmptyDataError`` -- se trata exactamente igual que
+      "el archivo no existe": no hay ninguna fila que recuperar de un CSV
+      vacio.
+    - **Mal formado.** Editado a mano, truncado a mitad de una fila, o
+      "arreglado" por una herramienta que no respeto las comillas.
+      ``pd.read_csv`` lanza ``pandas.errors.ParserError``. A diferencia del
+      caso vacio, aqui SI puede haber datos reales antes del punto de
+      ruptura -- descartarlos en silencio seria la misma perdida silenciosa
+      que este proyecto evita en otras partes -- asi que esto SI se deja
+      propagar, pero como un ``ValueError`` con un mensaje para el
+      operador, no como el ``ParserError`` crudo de pandas. El punto de
+      entrada (``__main__._launch``, I12) construye la ventana bajo el
+      mismo guard ``_StartupError`` que cualquier otro fallo de arranque,
+      asi que este ``ValueError`` termina como una linea en stderr y
+      codigo de salida 1 -- nunca un traceback.
     """
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        if self.path.exists():
-            self._rows: list[dict[str, Any]] = pd.read_csv(self.path).to_dict("records")
-        else:
+        if not self.path.exists():
+            self._rows: list[dict[str, Any]] = []
+            return
+        try:
+            self._rows = pd.read_csv(self.path).to_dict("records")
+        except pd.errors.EmptyDataError:
             self._rows = []
+        except pd.errors.ParserError as exc:
+            raise ValueError(
+                f"validation log {self.path} exists but could not be parsed as CSV: {exc}. "
+                "Fix it by hand, or move it aside to start a fresh log, before running again."
+            ) from exc
 
     def record(
         self,
@@ -185,6 +236,8 @@ class ValidationLog:
         measures: BananaMeasures,
         actual_weight_g: float,
         actual_length_mm: float | None = None,
+        length_std_mm: float | None = None,
+        caliper_std_mm: float | None = None,
     ) -> None:
         """Agrega una muestra y reescribe el CSV.
 
@@ -194,12 +247,23 @@ class ValidationLog:
         fruta que medir; las muestras de banano real con cabo si deberian
         traerla, porque es la unica forma de validar el limite de +-3 mm
         del recorte de pedicelo.
+
+        ``length_std_mm``/``caliper_std_mm`` son OPCIONALES por la misma
+        razon (I9, ronda de correcciones finales): quien SI las tiene es
+        ``ValidationView.record_sample``, que las lee del ``TrackAggregate``
+        asentado -- un llamador directo de este metodo (como hacen las
+        pruebas de este modulo, con un ``BananaMeasures`` de un solo
+        cuadro) no tiene una desviacion temporal que ofrecer, y ``None``
+        sobrevive al CSV como NaN en vez de fabricar un 0.0 que afirmaria
+        "incertidumbre cero" con tanta falsedad como no mostrar nada.
         """
         self._rows.append(
             {
                 "sample_id": sample_id,
                 "codex_length_mm": measures.codex_length_mm,
+                "length_std_mm": length_std_mm,
                 "caliper_mm": measures.caliper_mm,
+                "caliper_std_mm": caliper_std_mm,
                 "area_mm2": measures.area_mm2,
                 "volume_mm3": measures.volume_mm3,
                 "actual_weight_g": actual_weight_g,

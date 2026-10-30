@@ -37,7 +37,8 @@ import cv2
 import numpy as np
 import pytest
 
-from codex_caliper.__main__ import main, probe_camera
+from codex_caliper import __main__ as entrypoint
+from codex_caliper.__main__ import VALIDATION_LOG_NAME, main, probe_camera
 from codex_caliper.config import AppConfig
 from codex_caliper.intrinsics import Intrinsics
 
@@ -378,6 +379,49 @@ def test_main_reports_a_clear_error_when_ultralytics_is_not_installed(
     assert "ultralytics" in err.lower()
     assert "pip install" in err.lower()
     assert 'pip install -e ".[live]"' in err
+    assert "Traceback" not in err
+
+
+def test_main_reports_a_clear_error_when_the_validation_log_is_unparseable(
+    tmp_path, capsys, monkeypatch
+):
+    """I12 (ronda de correcciones finales): ``_launch`` llamaba a
+    ``MainWindow(...)`` DESPUES de que ``main`` cerrara su ``try/except
+    _StartupError`` -- ``MainWindow.__init__`` construye un
+    ``ValidationLog`` que lee el CSV real de disco, y un archivo mal
+    formado ahi (editado a mano, truncado a mitad de una fila) llegaba como
+    un traceback crudo de ``pandas.errors.ParserError``, DESPUES del sondeo
+    de camara y la carga de YOLO -- el peor momento posible para leer un
+    error que se podia dar al instante.
+
+    Se llega hasta aqui con un detector FALSO (``_build_detector``
+    parcheado) en vez de instalar ``ultralytics`` de verdad: lo que este
+    test ejercita es la construccion de la ventana, no el detector, y la
+    suite no puede depender de ~2.5 GB de pesos.
+
+    La implementacion equivocada que esta prueba RECHAZA: la version
+    anterior, que llamaba ``MainWindow(...)`` fuera del guard -- ahi este
+    test veria un ``pandas.errors.ParserError`` sin capturar (no un exit
+    code 1 limpio) y ``"Traceback" in err`` seria verdadero.
+    """
+    cfg_path = _write_valid_config(tmp_path)
+    intrinsics_path = _write_valid_intrinsics(tmp_path)
+    monkeypatch.setattr(entrypoint, "_build_detector", lambda: object())
+
+    # El log de validacion vive junto a la config (``VALIDATION_LOG_NAME``,
+    # ver el docstring del modulo) -- se mangla ahi.
+    bad_log = cfg_path.parent / VALIDATION_LOG_NAME
+    bad_log.write_text('sample_id,codex_length_mm\n"unterminated quote,180.0\n', encoding="utf-8")
+
+    exit_code = main(
+        ["--config", str(cfg_path), "--intrinsics", str(intrinsics_path)],
+        open_capture=lambda index, **kwargs: FakeCapture(),
+    )
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "validation" in err.lower()
+    assert str(bad_log) in err
     assert "Traceback" not in err
 
 

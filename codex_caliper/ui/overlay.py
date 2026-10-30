@@ -47,7 +47,6 @@ import math
 import cv2
 import numpy as np
 
-from codex_caliper.aggregation import TEMPORAL_WINDOW
 from codex_caliper.aruco_tools import CalibrationState, MarkerDetection, calibration_state
 from codex_caliper.pipeline import BananaResult
 
@@ -234,8 +233,17 @@ def text_anchor_for(mask: np.ndarray) -> tuple[int, int]:
     return x, y
 
 
-def _progress_bar(samples: int, window: int = TEMPORAL_WINDOW, segments: int = 4) -> str:
-    """Barra ASCII de progreso (p.ej. ``"###."``) -- ver nota de glifos en ``draw_results``."""
+def _progress_bar(samples: int, window: int, segments: int = 4) -> str:
+    """Barra ASCII de progreso (p.ej. ``"###."``) -- ver nota de glifos en ``draw_results``.
+
+    ``window`` no tiene default (ronda de correcciones finales, I7): antes
+    caia a ``TEMPORAL_WINDOW`` (30, la constante de modulo de
+    ``aggregation.py``), asi que un montaje con ``cfg.temporal_window``
+    distinto -- un campo de config documentado, no un caso exotico --
+    mostraba una barra llena (y un cociente recortado por ``min(..., 1.0)``)
+    sobre una medida que todavia no se asento. El denominador real es
+    ``aggregate.window`` (ver ``TrackAggregate.window``), no esta constante.
+    """
     fraction = min(samples / window, 1.0)
     filled = round(fraction * segments)
     return "#" * filled + "." * (segments - filled)
@@ -259,12 +267,18 @@ def compose_label_lines(result: BananaResult, mm_per_px: float) -> list[str]:
     podria alternar pass/fail frame a frame con la interfaz mostrando
     numeros como si fueran definitivos. Una vez ``locked`` ocurre lo
     opuesto: la barra de progreso desaparece (ya no esta "progresando",
-    esta fija) y aparecen el veredicto, L, calibre y peso, en ese orden --
+    esta fija) y aparecen el veredicto, L, qalibre y peso, en ese orden --
     el orden del mockup de la spec.
     """
     aggregate = result.aggregate
     if not aggregate.locked:
-        return [f"#{result.track_id}", f"{_progress_bar(aggregate.samples)} {aggregate.samples}/{TEMPORAL_WINDOW}"]
+        # I7: el denominador es ``aggregate.window`` (la ventana REAL con la
+        # que este agregado se armo, Task 11/I7), no la constante de modulo
+        # ``TEMPORAL_WINDOW`` -- ver docstring de ``_progress_bar``.
+        return [
+            f"#{result.track_id}",
+            f"{_progress_bar(aggregate.samples, aggregate.window)} {aggregate.samples}/{aggregate.window}",
+        ]
 
     verdict_word = "OK" if result.verdict.passes else "FAIL"
     lines = [

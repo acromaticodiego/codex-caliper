@@ -56,7 +56,7 @@ from codex_caliper.codex import CodexVerdict
 from codex_caliper.homography import DegenerateMarkerLayout, PlaneCalibration
 from codex_caliper.intrinsics import Intrinsics, IntrinsicsMismatch
 from codex_caliper.pipeline import MARKER_COUNT, BananaResult, FrameResult
-from codex_caliper.aggregation import TrackAggregate
+from codex_caliper.aggregation import TEMPORAL_WINDOW, TrackAggregate
 from codex_caliper.ui.main_window import RESIDUAL_WARN_MM, MainWindow
 from codex_caliper.ui.overlay import text_anchor_for
 from codex_caliper.ui.side_panel import SIDE_PANEL_WIDTH_PX, SidePanel
@@ -109,6 +109,7 @@ def _aggregate(*, track_id: int = 1, locked: bool = True, samples: int = 30) -> 
         caliper_mm=38.4,
         caliper_std_mm=0.5,
         volume_mm3=1.0e5,
+        window=TEMPORAL_WINDOW,
     )
 
 

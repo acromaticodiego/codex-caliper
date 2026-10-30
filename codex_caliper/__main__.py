@@ -36,10 +36,19 @@ el sistema mediria mal en silencio -- exactamente el fallo que este
 proyecto persigue en todas sus tareas. Falta la config: se dice donde se
 buscaba y se manda al README.
 
-**No ajusta la densidad al arrancar.** ``fit_density`` exige >= 10 muestras
-(Task 15) y la bitacora de validacion puede estar vacia o a medias; el
-peso estimado lo gobierna la vista de validacion, que ya calcula el ajuste
-sobre las muestras que de verdad existen.
+**No ajusta la densidad al arrancar, y nada la ajusta todavia (C3, ronda de
+correcciones finales).** ``Pipeline`` acepta un ``density_g_per_cm3``
+opcional (``_weight_g`` lo necesita para convertir volumen en peso), pero
+``_build_detector``/``main`` construyen el ``Pipeline`` SIN pasarlo, asi
+que queda en ``None`` para toda la sesion y ``estimated_weight_g`` nunca
+deja de ser ``None`` -- la linea de peso de la spec S8 simplemente no
+aparece. ``ValidationView`` SI llama a ``fit_density`` sobre las muestras
+reales (``>= 10``, Task 15) para mostrar la densidad ajustada en su propio
+resumen, pero eso es SOLO para mostrarla ahi: ningun camino de este
+proyecto toma ese resultado y lo entrega de vuelta al ``Pipeline`` en
+vivo. Cerrar esto es trabajo nuevo (que pantalla dispara el ajuste, con
+que muestras, y cuando se refresca) fuera del alcance de esta ronda -- ver
+"Known limits" del README.
 """
 
 from __future__ import annotations
@@ -228,26 +237,62 @@ def _launch(
     pipeline: Pipeline,
     camera_index: int,
     validation_log_path: Path,
-) -> int:
-    """Levanta la interfaz Qt con la camara conectada, y devuelve su codigo de salida.
+):
+    """Construye la ventana y la camara, y devuelve ``(app, window)`` sin
+    arrancar el bucle de eventos todavia.
 
     Los imports de la interfaz son perezosos a proposito: ninguno de los
     caminos de fallo de arriba necesita el stack de widgets de Qt, y
     cargarlo igual haria que un error de config dependiera de que PySide6
     importe bien.
+
+    Por que esto YA NO llama a ``app.exec()`` (I12, ronda de correcciones
+    finales)
+    --------------------------------------------------------------------------
+    ``MainWindow.__init__`` construye un ``ValidationLog`` sobre el CSV real
+    del rig (``pd.read_csv``): un archivo vacio (escritura interrumpida) o
+    mal formado (editado a mano) lanzaba antes de este cambio como un
+    traceback crudo, FUERA de cualquier guard -- el ``try/except
+    _StartupError`` de ``main`` ya se habia cerrado para cuando esta
+    funcion se llamaba, y en el peor momento posible: despues del sondeo de
+    camara y la carga de YOLO, varios segundos de espera para leer un error
+    que se podia dar al instante. Separar la CONSTRUCCION (que puede fallar
+    por una causa de arranque) del bucle de eventos (que no es un fallo de
+    arranque, es la aplicacion ya corriendo) deja a ``main`` envolver solo
+    la primera bajo el mismo ``_StartupError`` que cualquier otro paso de
+    esta cadena.
     """
     from PySide6.QtWidgets import QApplication
 
     from codex_caliper.camera import CameraThread
     from codex_caliper.ui.main_window import MainWindow
 
-    app = QApplication(sys.argv[:1])
-    window = MainWindow(
-        intrinsics=intrinsics,
-        pipeline=pipeline,
-        cfg=cfg,
-        validation_log_path=validation_log_path,
-    )
+    # ``QApplication.instance()`` primero (I12, ronda de correcciones
+    # finales, hallazgo de la suite completa): en el rig real nunca hay una
+    # instancia previa y esto es un no-op, pero bajo pytest -- donde
+    # ``pytest-qt`` ya crea y comparte UNA ``QApplication`` para toda la
+    # sesion -- ``QApplication(...)`` a secas lanza
+    # ``RuntimeError: ... destroy the QApplication singleton...`` en
+    # cuanto cualquier otro archivo de pruebas con ``qtbot`` corrio antes
+    # que ``test_entrypoint.py`` (el orden de recoleccion de pytest no es
+    # garantia de lo contrario).
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+    try:
+        window = MainWindow(
+            intrinsics=intrinsics,
+            pipeline=pipeline,
+            cfg=cfg,
+            validation_log_path=validation_log_path,
+        )
+    except (OSError, ValueError) as exc:
+        # Misma tupla de excepciones "config mala, no bug" que
+        # ``_load_config``/``_load_intrinsics`` -- ver sus comentarios. El
+        # ``ValueError`` es el que ``ValidationLog.__init__`` lanza para un
+        # CSV mal formado (ver su docstring); ``OSError`` cubre un archivo
+        # ilegible por permisos. Cualquier otra excepcion (un ``TypeError``
+        # de programacion, por ejemplo) se deja propagar: es un bug, no un
+        # problema de puesta en marcha, y tiene que verse como tal.
+        raise _StartupError(f"could not start the window: {exc}") from exc
     window.resize(*_INITIAL_WINDOW_SIZE_PX)
 
     camera_thread = CameraThread(camera_index)
@@ -257,8 +302,7 @@ def _launch(
     window.connect_camera(camera_thread)
     camera_thread.start()
 
-    window.show()
-    return app.exec()
+    return app, window
 
 
 def main(argv: list[str] | None = None, *, open_capture=camera.open_capture) -> int:
@@ -298,17 +342,27 @@ def main(argv: list[str] | None = None, *, open_capture=camera.open_capture) -> 
 
         detector = _build_detector()
         pipeline = Pipeline(cfg, intrinsics, detector)
+
+        # La CONSTRUCCION de la ventana entra aqui, dentro del mismo guard
+        # (I12, ronda de correcciones finales) -- ver el docstring de
+        # ``_launch`` para por que ya no incluye ``app.exec()``.
+        app, window = _launch(
+            cfg,
+            intrinsics,
+            pipeline,
+            args.camera,
+            args.config.parent / VALIDATION_LOG_NAME,
+        )
     except _StartupError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-    return _launch(
-        cfg,
-        intrinsics,
-        pipeline,
-        args.camera,
-        args.config.parent / VALIDATION_LOG_NAME,
-    )
+    # El bucle de eventos queda FUERA del guard a proposito: una vez que la
+    # ventana existe, cualquier fallo de aqui en adelante es un bug de la
+    # aplicacion en marcha, no un problema de puesta en marcha que
+    # ``_StartupError`` deba traducir.
+    window.show()
+    return app.exec()
 
 
 if __name__ == "__main__":

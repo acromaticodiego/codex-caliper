@@ -55,6 +55,20 @@ class TrackAggregate:
     ventana; ``length_std_mm`` y ``caliper_std_mm`` son su desviacion
     estandar, reportada como la incertidumbre de la medida (no un dato de
     diagnostico interno).
+
+    ``window`` (ronda de correcciones finales, I7) es el tamano de ventana
+    REAL con el que este agregado se calculo (``MeasurementAggregator.window``,
+    que a su vez viene de ``cfg.temporal_window``) -- no el default de
+    modulo ``TEMPORAL_WINDOW``. Antes de este campo, ``overlay.py`` leia
+    ``TEMPORAL_WINDOW`` directamente para la barra de progreso y el
+    denominador de "samples/window", asi que un montaje con
+    ``temporal_window: 60`` en la config mostraba "45/30" -- una barra
+    saturada (y un cociente > 1 silenciosamente recortado por el
+    ``min(..., 1.0)`` de ``_progress_bar``) sobre una medida que todavia le
+    faltaban 15 cuadros para asentarse. ``TrackAggregate`` es el dueno
+    natural: ya es el objeto que ``samples`` describe, y es el unico lugar
+    que ``MeasurementAggregator._summarize`` construye con el ``window``
+    real a la mano.
     """
 
     track_id: int
@@ -65,6 +79,7 @@ class TrackAggregate:
     caliper_mm: float
     caliper_std_mm: float
     volume_mm3: float
+    window: int
 
 
 class MeasurementAggregator:
@@ -130,4 +145,5 @@ class MeasurementAggregator:
             caliper_mm=caliper_mm,
             caliper_std_mm=caliper_std_mm,
             volume_mm3=volume_mm3,
+            window=self.window,
         )

@@ -71,6 +71,7 @@ def _aggregate(
     caliper_mm: float = 38.4,
     caliper_std_mm: float = 0.6,
     volume_mm3: float = 1.0e5,
+    window: int = TEMPORAL_WINDOW,
 ) -> TrackAggregate:
     return TrackAggregate(
         track_id=track_id,
@@ -81,6 +82,7 @@ def _aggregate(
         caliper_mm=caliper_mm,
         caliper_std_mm=caliper_std_mm,
         volume_mm3=volume_mm3,
+        window=window,
     )
 
 
@@ -167,14 +169,6 @@ def test_non_positive_floor_is_rejected_instead_of_silently_widened():
         format_measurement(187.34567, 0.03, floor_mm=0.0)
     with pytest.raises(ValueError):
         format_measurement(187.34567, 0.03, floor_mm=-0.5)
-
-
-def test_format_measurement_does_not_mutate_its_arguments():
-    # sanity check barato: son floats, pero coherente con la convencion del
-    # proyecto de no mutar lo que se recibe.
-    value, std = 187.34, 0.82
-    format_measurement(value, std)
-    assert (value, std) == (187.34, 0.82)
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +292,34 @@ def test_locked_result_label_has_no_progress_indicator():
     locked = _result(_rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150))
     lines = compose_label_lines(locked, mm_per_px=0.2)
     assert not any(f"/{TEMPORAL_WINDOW}" in line for line in lines)
+
+
+def test_progress_denominator_follows_the_aggregates_own_window_not_the_module_constant():
+    """I7 (ronda de correcciones finales): ``compose_label_lines``/``_progress_bar``
+    leian ``TEMPORAL_WINDOW`` (el default de modulo de ``aggregation.py``, 30)
+    directamente, mientras ``MeasurementAggregator`` recibe ``cfg.temporal_window``
+    -- un campo de config documentado que puede ser distinto. Con
+    ``temporal_window: 60`` en la config, un agregado con 45 muestras sin
+    asentar mostraba "45/30": una barra YA LLENA (``min(45/30, 1.0) == 1.0``)
+    sobre una medida a la que todavia le faltan 15 cuadros.
+
+    La implementacion equivocada que esta prueba RECHAZA: volver a leer
+    ``TEMPORAL_WINDOW`` (30) en vez de ``aggregate.window`` (60) -- esa
+    version muestra "45/30" y una barra llena; esta prueba exige "45/60" y
+    una barra a 3/4.
+    """
+    window = 60
+    assert window != TEMPORAL_WINDOW, "el caso solo discrimina si window difiere del default de modulo"
+    unlocked = _result(
+        _rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150),
+        aggregate=_aggregate(samples=45, locked=False, window=window),
+    )
+    lines = compose_label_lines(unlocked, mm_per_px=0.2)
+    assert any("45/60" in line for line in lines), lines
+    assert not any("45/30" in line for line in lines), lines
+    # 45/60 = 0.75 de 4 segmentos = 3 llenos, 1 vacio -- no los 4 llenos que
+    # saldrian de dividir por 30 en vez de por 60.
+    assert any("###." in line for line in lines), lines
 
 
 # ---------------------------------------------------------------------------

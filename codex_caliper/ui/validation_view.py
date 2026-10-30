@@ -52,6 +52,7 @@ from PySide6.QtWidgets import QHeaderView, QLabel, QTableWidget, QTableWidgetIte
 
 from codex_caliper.aggregation import TrackAggregate
 from codex_caliper.geometry.measures import BananaMeasures
+from codex_caliper.ui.overlay import format_measurement
 from codex_caliper.ui.theme import (
     BG_VOID_HEX,
     INK_MUTED_HEX,
@@ -67,8 +68,13 @@ from codex_caliper.validation import MIN_DENSITY_SAMPLES, ValidationLog, error_m
 #: legible para un operador que no programa).
 _UNAVAILABLE_CELL_TEXT = "—"
 
-#: Columnas de la tabla, en el mismo orden que ``validation._COLUMNS`` --
-#: esta vista no decide un orden propio para los mismos datos.
+#: Columnas VISIBLES de la tabla. ``length_std_mm``/``caliper_std_mm`` no
+#: tienen columna propia (I9, ronda de correcciones finales): se MUESTRAN
+#: fundidas en la celda de ``codex_length_mm``/``caliper_mm`` ("187.3 ±
+#: 0.8 mm", via ``format_measurement`` -- la misma funcion que usa todo el
+#: resto de la interfaz), no como un numero aparte sin unidad ni contexto.
+#: Siguen existiendo como columnas del CSV (``validation._COLUMNS``) para
+#: que la cifra sobreviva fuera de esta tabla.
 _COLUMNS = [
     "sample_id",
     "codex_length_mm",
@@ -84,10 +90,46 @@ _COLUMN_HEADERS = {
     "codex_length_mm": "Length (mm)",
     "caliper_mm": "Caliper (mm)",
     "area_mm2": "Area (mm²)",
-    "volume_mm3": "Volume (mm³)",
+    "volume_mm3": "Volume (cm³)",
     "actual_weight_g": "Actual weight (g)",
     "actual_length_mm": "Actual length (mm)",
 }
+
+#: Columnas de std que acompanan a una columna de valor (I9): la clave es
+#: la columna visible, el valor es la columna del CSV que trae su
+#: desviacion -- ninguna de las dos tiene columna propia en la tabla, ver
+#: arriba.
+_STD_COLUMN_OF = {
+    "codex_length_mm": "length_std_mm",
+    "caliper_mm": "caliper_std_mm",
+}
+
+#: Milimetros cubicos por centimetro cubico -- misma conversion que
+#: ``pipeline._MM3_PER_CM3``, repetida aqui porque esta vista no importa
+#: ``pipeline`` (y no deberia, para no acoplar la tabla de validacion al
+#: pipeline en vivo).
+_MM3_PER_CM3 = 1000.0
+
+
+def _format_volume_cm3(volume_mm3: float) -> str:
+    """``volume_mm3`` como texto en cm³, a 3 cifras significativas (I9).
+
+    Antes esta columna imprimia el mm³ crudo con ``.1f`` -- "100000.0" para
+    un volumen de 100 cm³, siete cifras significativas sobre una cantidad
+    integrada de medidas con +-1 mm de incertidumbre (spec S4: falsa
+    precision). No hay una sigma de volumen que fundir aqui (``TrackAggregate``
+    no agrega una, ver el docstring del modulo sobre ``area_mm2``/
+    ``width_profile``), asi que en vez de ``format_measurement`` se redondea
+    a 3 cifras significativas -- bastante por debajo de las 7 originales,
+    consistente con la precision de ``codex_length_mm``/``caliper_mm`` de la
+    misma fila.
+    """
+    value_cm3 = volume_mm3 / _MM3_PER_CM3
+    if value_cm3 == 0.0:
+        return "0.00 cm³"
+    exponent = math.floor(math.log10(abs(value_cm3)))
+    decimals = max(0, 2 - exponent)
+    return f"{value_cm3:.{decimals}f} cm³"
 
 
 class ValidationView(QWidget):
@@ -173,7 +215,14 @@ class ValidationView(QWidget):
                 "temporal window to lock before recording it."
             )
         measures = self.measures_from_aggregate(aggregate)
-        self._log.record(sample_id, measures, actual_weight_g, actual_length_mm)
+        self._log.record(
+            sample_id,
+            measures,
+            actual_weight_g,
+            actual_length_mm,
+            length_std_mm=aggregate.length_std_mm,
+            caliper_std_mm=aggregate.caliper_std_mm,
+        )
         self.refresh()
 
     # -- Presentacion ----------------------------------------------------------
@@ -199,18 +248,52 @@ class ValidationView(QWidget):
         for row_idx in range(len(frame)):
             row = frame.iloc[row_idx]
             for col_idx, column in enumerate(_COLUMNS):
-                value = row[column]
-                item = QTableWidgetItem(self._format_cell(column, value))
+                item = QTableWidgetItem(self._format_cell(column, row))
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._table.setItem(row_idx, col_idx, item)
 
     @staticmethod
-    def _format_cell(column: str, value) -> str:
+    def _is_missing(value) -> bool:
+        return value is None or (isinstance(value, float) and math.isnan(value))
+
+    @classmethod
+    def _format_cell(cls, column: str, row: pd.Series) -> str:
+        """Celda de la columna ``column`` para ``row`` (I9, ronda de correcciones
+        finales).
+
+        Antes esta funcion imprimia TODA columna numerica con ``.1f`` a
+        secas -- ``volume_mm3`` salia "100000.0" (siete cifras significativas
+        sobre un volumen integrado de cantidades con +-1 mm de incertidumbre,
+        la falsa precision exacta que S4 prohibe) y ``codex_length_mm``/
+        ``caliper_mm`` salian sin ningun ``±``, la unica tabla publicable
+        (spec S13, punto 4) que no pasaba por ``format_measurement`` como
+        cualquier otro numero mostrado por esta interfaz. Ahora:
+
+        - ``volume_mm3`` se muestra en cm³ (``_format_volume_cm3``), no en mm³.
+        - ``codex_length_mm``/``caliper_mm`` se funden con su columna de
+          desviacion (``_STD_COLUMN_OF``) a traves de ``format_measurement``,
+          la MISMA funcion que ``overlay.py``/``side_panel.py`` usan para
+          cualquier otra cifra del sistema -- nunca una segunda convencion de
+          formato para el mismo tipo de numero.
+        - Si la desviacion no esta disponible (una fila vieja, o un
+          ``ValidationLog.record`` llamado sin ella -- ver docstring del
+          modulo ``validation.py``), se cae al numero plano en vez de
+          fabricar un ``± 0.0`` que mentiria sobre la incertidumbre.
+        """
+        value = row[column]
         if column == "sample_id":
             return str(value)
-        if value is None or (isinstance(value, float) and math.isnan(value)):
+        if cls._is_missing(value):
             return _UNAVAILABLE_CELL_TEXT
-        return f"{float(value):.1f}"
+        value = float(value)
+        if column == "volume_mm3":
+            return _format_volume_cm3(value)
+        std_column = _STD_COLUMN_OF.get(column)
+        if std_column is not None:
+            std = row.get(std_column)
+            if not cls._is_missing(std):
+                return format_measurement(value, float(std))
+        return f"{value:.1f}"
 
     def _compute_summary_text(self, frame: pd.DataFrame) -> str:
         """Decide deliberadamente que mostrar en cada uno de los tres
