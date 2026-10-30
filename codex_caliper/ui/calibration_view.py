@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import numpy as np
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QImage, QPixmap
+from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -57,18 +57,17 @@ from codex_caliper.intrinsics import (
     find_chessboard,
     undistort,
 )
+from codex_caliper.ui.imaging import bgr_to_qpixmap
 from codex_caliper.ui.overlay import draw_marker_overlay
-
-# Paleta: mismos tokens que video_view.py/side_panel.py/main_window.py --
-# estas vistas tienen que leerse como la misma aplicacion (ver informe).
-_BG_VOID_HEX = "#171B20"
-_SURFACE_HEX = "#1D2227"
-_RULE_HEX = "#333A42"
-_INK_PRIMARY_HEX = "#E7EAED"
-_INK_MUTED_HEX = "#8A929B"
-_SIGNAL_PASS_HEX = "#5FBF8F"
-_SIGNAL_FAIL_HEX = "#E0676B"
-_SIGNAL_WARN_HEX = "#D9A54B"
+from codex_caliper.ui.theme import (
+    BG_VOID_HEX,
+    INK_MUTED_HEX,
+    INK_PRIMARY_HEX,
+    SIGNAL_FAIL_HEX,
+    SIGNAL_PASS_HEX,
+    SIGNAL_WARN_HEX,
+    SURFACE_HEX,
+)
 
 #: Esquinas internas por defecto del tablero de calibracion (columnas, filas).
 _DEFAULT_PATTERN_SIZE = (9, 6)
@@ -85,18 +84,18 @@ _DEFAULT_IMAGE_SIZE = (1920, 1080)
 _PREVIEW_MAX_WIDTH_PX = 640
 
 
-def _bgr_to_qpixmap(frame: np.ndarray) -> QPixmap:
-    """Conversion BGR -> QPixmap, igual que ``video_view._ndarray_bgr_to_qpixmap``.
+def _preview_pixmap(frame: np.ndarray) -> QPixmap:
+    """``frame`` como ``QPixmap``, limitado a ``_PREVIEW_MAX_WIDTH_PX`` de ancho.
 
-    Duplicada en vez de importada: ese helper es privado de ``video_view.py``
-    (prefijo ``_``), y las dos vistas de esta tarea no comparten mas que esta
-    conversion elemental con el video en vivo.
+    Las dos vistas de este modulo tenian este cuerpo duplicado LITERALMENTE
+    (``_update_preview_pixmap``, una en cada clase, en el mismo archivo).
+    Una sola funcion aqui es lo que hace que las dos vistas previas no
+    puedan divergir en el ancho maximo ni en el modo de reescalado.
     """
-    frame = np.ascontiguousarray(frame)
-    height, width = frame.shape[:2]
-    bytes_per_line = frame.strides[0]
-    image = QImage(frame.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
-    return QPixmap.fromImage(image.copy())
+    pixmap = bgr_to_qpixmap(frame)
+    if pixmap.width() > _PREVIEW_MAX_WIDTH_PX:
+        pixmap = pixmap.scaledToWidth(_PREVIEW_MAX_WIDTH_PX, Qt.TransformationMode.SmoothTransformation)
+    return pixmap
 
 
 class IntrinsicCalibrationView(QWidget):
@@ -139,23 +138,23 @@ class IntrinsicCalibrationView(QWidget):
         self._undistort_preview = False
         self.displayed_frame: np.ndarray | None = None
 
-        self.setStyleSheet(f"background-color: {_BG_VOID_HEX};")
+        self.setStyleSheet(f"background-color: {BG_VOID_HEX};")
 
         self._preview_label = QLabel("No frame yet")
-        self._preview_label.setStyleSheet(f"color: {_INK_MUTED_HEX}; background-color: {_SURFACE_HEX};")
+        self._preview_label.setStyleSheet(f"color: {INK_MUTED_HEX}; background-color: {SURFACE_HEX};")
         self._preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preview_label.setMinimumSize(320, 240)
 
         self._pose_label = QLabel()
         self._pose_label.setFont(QFont("Consolas", 10))
-        self._pose_label.setStyleSheet(f"color: {_INK_PRIMARY_HEX};")
+        self._pose_label.setStyleSheet(f"color: {INK_PRIMARY_HEX};")
 
         self._status_label = QLabel()
         self._status_label.setFont(QFont("Consolas", 10))
         self._status_label.setWordWrap(True)
 
         self._toggle_checkbox = QCheckBox("Show undistorted (before/after)")
-        self._toggle_checkbox.setStyleSheet(f"color: {_INK_PRIMARY_HEX};")
+        self._toggle_checkbox.setStyleSheet(f"color: {INK_PRIMARY_HEX};")
         self._toggle_checkbox.toggled.connect(self._on_toggle_checked)
 
         self._calibrate_button = QPushButton("Run calibration")
@@ -259,7 +258,7 @@ class IntrinsicCalibrationView(QWidget):
             self.run_calibration()
         except ValueError as exc:
             self._status_label.setText(f"Cannot calibrate yet: {exc}")
-            self._status_label.setStyleSheet(f"color: {_SIGNAL_WARN_HEX};")
+            self._status_label.setStyleSheet(f"color: {SIGNAL_WARN_HEX};")
 
     @property
     def result_accepted(self) -> bool | None:
@@ -350,10 +349,7 @@ class IntrinsicCalibrationView(QWidget):
     def _update_preview_pixmap(self) -> None:
         if self.displayed_frame is None:
             return
-        pixmap = _bgr_to_qpixmap(self.displayed_frame)
-        if pixmap.width() > _PREVIEW_MAX_WIDTH_PX:
-            pixmap = pixmap.scaledToWidth(_PREVIEW_MAX_WIDTH_PX, Qt.TransformationMode.SmoothTransformation)
-        self._preview_label.setPixmap(pixmap)
+        self._preview_label.setPixmap(_preview_pixmap(self.displayed_frame))
 
     def _update_pose_label(self) -> None:
         self._pose_label.setText(f"Poses captured: {self.pose_count}")
@@ -367,7 +363,7 @@ class IntrinsicCalibrationView(QWidget):
         else:
             text, warning = self.rejection_message(), True
         self._status_label.setText(text)
-        color = _SIGNAL_WARN_HEX if warning else _INK_PRIMARY_HEX
+        color = SIGNAL_WARN_HEX if warning else INK_PRIMARY_HEX
         self._status_label.setStyleSheet(f"color: {color};")
 
 
@@ -390,10 +386,10 @@ class PlaneCalibrationView(QWidget):
         self._plane: PlaneCalibration | None = None
         self._has_frame = False
 
-        self.setStyleSheet(f"background-color: {_BG_VOID_HEX};")
+        self.setStyleSheet(f"background-color: {BG_VOID_HEX};")
 
         self._preview_label = QLabel("No frame yet")
-        self._preview_label.setStyleSheet(f"color: {_INK_MUTED_HEX}; background-color: {_SURFACE_HEX};")
+        self._preview_label.setStyleSheet(f"color: {INK_MUTED_HEX}; background-color: {SURFACE_HEX};")
         self._preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preview_label.setMinimumSize(320, 240)
 
@@ -402,7 +398,7 @@ class PlaneCalibrationView(QWidget):
         self._scale_label = QLabel()
         for label in (self._markers_label, self._residual_label, self._scale_label):
             label.setFont(QFont("Consolas", 10))
-            label.setStyleSheet(f"color: {_INK_PRIMARY_HEX};")
+            label.setStyleSheet(f"color: {INK_PRIMARY_HEX};")
 
         info = QVBoxLayout()
         info.addWidget(self._markers_label)
@@ -461,26 +457,25 @@ class PlaneCalibrationView(QWidget):
         return f"{self._plane.mm_per_px:.3f} mm/px"
 
     def _update_preview_pixmap(self) -> None:
-        pixmap = _bgr_to_qpixmap(self.displayed_frame)
-        if pixmap.width() > _PREVIEW_MAX_WIDTH_PX:
-            pixmap = pixmap.scaledToWidth(_PREVIEW_MAX_WIDTH_PX, Qt.TransformationMode.SmoothTransformation)
-        self._preview_label.setPixmap(pixmap)
+        if self.displayed_frame is None:
+            return
+        self._preview_label.setPixmap(_preview_pixmap(self.displayed_frame))
 
     def _refresh_labels(self) -> None:
         ids = self.marker_ids()
         state = self.state
         if state is None:
             self._markers_label.setText("Markers: — (no frame yet)")
-            color = _INK_PRIMARY_HEX
+            color = INK_PRIMARY_HEX
         elif state is CalibrationState.OK:
             self._markers_label.setText(f"Markers: {ids} OK")
-            color = _SIGNAL_PASS_HEX
+            color = SIGNAL_PASS_HEX
         elif state is CalibrationState.DEGRADED:
             self._markers_label.setText(f"Markers: {ids} DEGRADED (3/4)")
-            color = _SIGNAL_WARN_HEX
+            color = SIGNAL_WARN_HEX
         else:
             self._markers_label.setText(f"Markers: {ids} BLOCKED")
-            color = _SIGNAL_FAIL_HEX
+            color = SIGNAL_FAIL_HEX
         self._markers_label.setStyleSheet(f"color: {color};")
         self._residual_label.setText(f"Residual: {self.residual_text()}")
         self._scale_label.setText(f"Scale: {self.mm_per_px_text()}")

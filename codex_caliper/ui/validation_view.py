@@ -52,15 +52,14 @@ from PySide6.QtWidgets import QHeaderView, QLabel, QTableWidget, QTableWidgetIte
 
 from codex_caliper.aggregation import TrackAggregate
 from codex_caliper.geometry.measures import BananaMeasures
+from codex_caliper.ui.theme import (
+    BG_VOID_HEX,
+    INK_MUTED_HEX,
+    INK_PRIMARY_HEX,
+    RULE_HEX,
+    SURFACE_HEX,
+)
 from codex_caliper.validation import MIN_DENSITY_SAMPLES, ValidationLog, error_metrics, fit_density
-
-# Paleta: mismos tokens que el resto de la interfaz (ver calibration_view.py).
-_BG_VOID_HEX = "#171B20"
-_SURFACE_HEX = "#1D2227"
-_RULE_HEX = "#333A42"
-_INK_PRIMARY_HEX = "#E7EAED"
-_INK_MUTED_HEX = "#8A929B"
-_SIGNAL_WARN_HEX = "#D9A54B"
 
 #: Cadena mostrada para un valor NaN en la tabla (p.ej. ``area_mm2`` de una
 #: muestra que vino de un ``TrackAggregate``, nunca medida). Nunca "0" (eso
@@ -107,7 +106,7 @@ class ValidationView(QWidget):
         self._log = log
         self._summary_text = ""
 
-        self.setStyleSheet(f"background-color: {_BG_VOID_HEX};")
+        self.setStyleSheet(f"background-color: {BG_VOID_HEX};")
 
         self._table = QTableWidget(0, len(_COLUMNS))
         self._table.setHorizontalHeaderLabels([_COLUMN_HEADERS[c] for c in _COLUMNS])
@@ -115,16 +114,16 @@ class ValidationView(QWidget):
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setStyleSheet(
-            f"QTableWidget {{ background-color: {_SURFACE_HEX}; color: {_INK_PRIMARY_HEX}; "
-            f"gridline-color: {_RULE_HEX}; border: none; }}"
-            f"QHeaderView::section {{ background-color: {_SURFACE_HEX}; color: {_INK_MUTED_HEX}; "
-            f"border: none; border-bottom: 1px solid {_RULE_HEX}; padding: 4px; }}"
+            f"QTableWidget {{ background-color: {SURFACE_HEX}; color: {INK_PRIMARY_HEX}; "
+            f"gridline-color: {RULE_HEX}; border: none; }}"
+            f"QHeaderView::section {{ background-color: {SURFACE_HEX}; color: {INK_MUTED_HEX}; "
+            f"border: none; border-bottom: 1px solid {RULE_HEX}; padding: 4px; }}"
         )
 
         self._summary_label = QLabel()
         self._summary_label.setFont(QFont("Consolas", 10))
         self._summary_label.setWordWrap(True)
-        self._summary_label.setStyleSheet(f"color: {_INK_PRIMARY_HEX}; padding: 8px;")
+        self._summary_label.setStyleSheet(f"color: {INK_PRIMARY_HEX}; padding: 8px;")
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._table, 1)

@@ -19,25 +19,17 @@ from PySide6.QtWidgets import QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
 
 from codex_caliper.pipeline import BananaResult
 from codex_caliper.ui.overlay import compose_label_lines
+from codex_caliper.ui.theme import (
+    INK_MUTED_HEX,
+    INK_PRIMARY_HEX,
+    RULE_HEX,
+    SIGNAL_FAIL_HEX,
+    SIGNAL_PASS_HEX,
+    SURFACE_HEX,
+)
 
 #: Ancho fijo del panel, en pixeles (spec S8, vinculante).
 SIDE_PANEL_WIDTH_PX = 240
-
-#: Escala por defecto del lienzo (spec S5.1), igual al default de
-#: ``format_measurement``. ``update_results`` acepta un ``mm_per_px``
-#: explicito para la calibracion real del cuadro; este default solo cubre
-#: a un llamador que lo omita.
-_DEFAULT_MM_PER_PX = 0.2
-
-# Paleta: mismos tokens que ``video_view.py``/``main_window.py`` (instrumento
-# de medicion, no tarjetas SaaS -- ver el informe de la tarea para la
-# justificacion completa de la paleta).
-_SURFACE_HEX = "#1D2227"
-_RULE_HEX = "#333A42"
-_INK_PRIMARY_HEX = "#E7EAED"
-_INK_MUTED_HEX = "#8A929B"
-_SIGNAL_PASS_HEX = "#5FBF8F"
-_SIGNAL_FAIL_HEX = "#E0676B"
 
 _EMPTY_STATE_TEXT = "No fruit detected"
 
@@ -51,8 +43,8 @@ def _header_color(result: BananaResult) -> str:
     informacion.
     """
     if not result.aggregate.locked:
-        return _INK_MUTED_HEX
-    return _SIGNAL_PASS_HEX if result.verdict.passes else _SIGNAL_FAIL_HEX
+        return INK_MUTED_HEX
+    return SIGNAL_PASS_HEX if result.verdict.passes else SIGNAL_FAIL_HEX
 
 
 def _build_card(result: BananaResult, mm_per_px: float) -> QFrame:
@@ -61,7 +53,7 @@ def _build_card(result: BananaResult, mm_per_px: float) -> QFrame:
     pone sobre el video."""
     card = QFrame()
     card.setStyleSheet(
-        f"QFrame {{ background-color: {_SURFACE_HEX}; border: 1px solid {_RULE_HEX}; }}"
+        f"QFrame {{ background-color: {SURFACE_HEX}; border: 1px solid {RULE_HEX}; }}"
     )
     layout = QVBoxLayout(card)
     layout.setContentsMargins(10, 8, 10, 8)
@@ -79,7 +71,7 @@ def _build_card(result: BananaResult, mm_per_px: float) -> QFrame:
     for line in lines[1:]:
         label = QLabel(line)
         label.setFont(mono_font)
-        label.setStyleSheet(f"color: {_INK_PRIMARY_HEX}; border: none;")
+        label.setStyleSheet(f"color: {INK_PRIMARY_HEX}; border: none;")
         layout.addWidget(label)
 
     return card
@@ -98,7 +90,7 @@ class SidePanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedWidth(SIDE_PANEL_WIDTH_PX)
-        self.setStyleSheet(f"background-color: {_SURFACE_HEX};")
+        self.setStyleSheet(f"background-color: {SURFACE_HEX};")
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -122,8 +114,23 @@ class SidePanel(QWidget):
         # aviso vacio en dos sitios distintos.
         self.update_results([])
 
-    def update_results(self, results: list[BananaResult], mm_per_px: float = _DEFAULT_MM_PER_PX) -> None:
-        """Reconstruye las tarjetas a partir de los resultados del cuadro actual."""
+    def update_results(self, results: list[BananaResult], mm_per_px: float | None = None) -> None:
+        """Reconstruye las tarjetas a partir de los resultados del cuadro actual.
+
+        ``mm_per_px`` solo se usa para FORMATEAR tarjetas, asi que es
+        opcional unicamente en el caso en que no hay ninguna que formatear.
+        La version anterior tenia un default de 0.2 (la escala del lienzo del
+        rig): probablemente muerto -- el unico llamador que lo omitia es el
+        ``update_results([])`` del constructor, y ``results`` vacio no
+        formatea nada -- pero un default plausible en una firma publica es
+        una invitacion a medir con una escala que nadie calibro. Si llegan
+        resultados sin escala, se lanza en vez de inventarla.
+        """
+        if results and mm_per_px is None:
+            raise ValueError(
+                "update_results needs the frame's real mm_per_px to format results; "
+                "there is no safe default scale for a measurement"
+            )
         while self._cards_layout.count() > 1:
             item = self._cards_layout.takeAt(0)
             widget = item.widget()
@@ -142,7 +149,7 @@ class SidePanel(QWidget):
         if not results:
             label = QLabel(_EMPTY_STATE_TEXT)
             label.setFont(QFont("Segoe UI", 9))
-            label.setStyleSheet(f"color: {_INK_MUTED_HEX};")
+            label.setStyleSheet(f"color: {INK_MUTED_HEX};")
             self._cards_layout.insertWidget(0, label)
             return
 
