@@ -254,7 +254,8 @@ def test_fruit_area_matches_the_analytic_fruit_area_with_a_pedicel_present(width
     half_cap_mm2 = 0.5 * np.pi * (width_mm / 2.0) ** 2
     expected_fruit_area_mm2 = gt.area_mm2 - half_cap_mm2
     # dos lados: el area tiene que caer DENTRO del 3% por arriba Y por
-    # abajo. Medido: -0.3% (w=36), -0.5% (w=24), -1.6% (w=12).
+    # abajo. Medido (ronda de correcciones finales, cifras re-verificadas):
+    # -0.28% (w=36), -0.62% (w=24), -1.76% (w=12).
     assert m.area_mm2 == pytest.approx(expected_fruit_area_mm2, rel=0.03)
 
     # y, por separado, que sigue siendo estrictamente menor que la mascara

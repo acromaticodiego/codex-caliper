@@ -79,7 +79,8 @@ def tiny_blob() -> np.ndarray:
 
 def perfect_disc() -> np.ndarray:
     """Un disco perfecto: su eje medial colapsa cerca del centro, sin dos
-    puntas significativas (elongacion ~1, ver ``_is_elongated`` en medial.py)."""
+    puntas significativas (elongacion ~1, ver el chequeo de ``elongation``
+    dentro de ``medial_axis_path`` en medial.py -- no es una funcion separada)."""
     mask = np.zeros((200, 200), np.uint8)
     cv2.circle(mask, (100, 100), 60, 255, -1)
     return mask

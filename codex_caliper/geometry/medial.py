@@ -397,7 +397,8 @@ def width_profile_mm(axis: MedialAxis, mm_per_px: float) -> tuple[np.ndarray, np
     El reescalado es UNIFORME a lo largo del camino: reparte la correccion
     en proporcion a la longitud cruda acumulada, asumiendo que el zigzag esta
     distribuido de forma pareja. Medido sobre el banano de referencia el
-    factor es muy estable entre calibres (0.943-0.947 para w=36/24/12), lo
+    factor es muy estable entre calibres (0.9469-0.9485 para w=12/36/24,
+    medido de nuevo tras la correccion de la abscisa), lo
     que es consistente con un sesgo de discretizacion por paso y no con una
     deformacion concentrada en un tramo.
     """
