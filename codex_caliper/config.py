@@ -52,8 +52,33 @@ class AppConfig:
 
     @classmethod
     def load(cls, path: str | Path) -> "AppConfig":
-        """Carga la config desde JSON, revirtiendo las claves de ``marker_layout`` a ``int``."""
+        """Carga la config desde JSON, revirtiendo las claves de ``marker_layout`` a ``int``.
+
+        Valida la FORMA de lo leido antes de indexar en ella (ronda de fix 3,
+        tras un hallazgo del re-revisor): un JSON sintacticamente valido pero
+        con la forma equivocada -- la raiz no es un objeto, o
+        ``marker_layout`` es una lista en vez de un objeto, ambos deslices de
+        edicion a mano realistas, no entradas contrived -- hacia que
+        ``data.get(...)``/``raw_layout.items()`` lanzaran ``AttributeError``.
+        Ese tipo no estaba en la tupla de ``_load_config`` (``__main__.py``)
+        y escapaba como traceback crudo -- justo lo que la Ruling 5 de ese
+        modulo prohibe. La correccion NO es agregar ``AttributeError`` a esa
+        tupla: eso volveria a tapar un bug real dentro de este metodo, que
+        es exactamente lo que esa ruling existe para evitar. En cambio, este
+        metodo valida lo que va a indexar y lo convierte en ``ValueError``
+        -- que la tupla ya atrapa -- para que "nunca un traceback" se
+        cumpla por construccion y no por enumerar tipos de excepcion.
+        """
         data = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"expected a JSON object at the top level, got {type(data).__name__}"
+            )
         raw_layout = data.get("marker_layout", {})
+        if not isinstance(raw_layout, dict):
+            raise ValueError(
+                "marker_layout must be a JSON object mapping marker id to [x, y], got "
+                f"{type(raw_layout).__name__}"
+            )
         data["marker_layout"] = {int(k): tuple(v) for k, v in raw_layout.items()}
         return cls(**data)

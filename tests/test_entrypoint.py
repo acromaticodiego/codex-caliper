@@ -132,6 +132,51 @@ def test_main_reports_a_clear_error_when_the_config_cannot_be_parsed(tmp_path, c
     assert "not found" not in err
 
 
+def test_main_reports_a_clear_error_when_the_config_top_level_is_not_an_object(
+    tmp_path, capsys
+):
+    """JSON SINTACTICAMENTE valido pero con la forma equivocada -- la raiz es
+    una lista, no un objeto -- no puede llegar como traceback tampoco
+    (ronda de fix 3: hallazgo del re-revisor sobre la ronda 2).
+
+    Antes de la validacion de forma en ``AppConfig.load``, esto llegaba
+    como ``data.get("marker_layout", {})`` sobre una lista ->
+    ``AttributeError: 'list' object has no attribute 'get'`` -- un tipo que
+    no estaba en la tupla de ``_load_config`` y por lo tanto un traceback
+    crudo en stderr.
+    """
+    broken = tmp_path / "app.json"
+    broken.write_text("[1, 2, 3]", encoding="utf-8")
+    assert main(["--config", str(broken)]) == 1
+    err = capsys.readouterr().err
+    assert "config" in err.lower()
+    assert str(broken) in err
+    assert "could not be read" in err
+    assert "Traceback" not in err
+
+
+def test_main_reports_a_clear_error_when_marker_layout_is_not_an_object(tmp_path, capsys):
+    """``marker_layout`` escrito como lista en vez de objeto -- un desliz de
+    edicion a mano realista, no una entrada contrived (ronda de fix 3).
+
+    Antes de la validacion de forma, esto llegaba como
+    ``raw_layout.items()`` sobre una lista ->
+    ``AttributeError: 'list' object has no attribute 'items'``, con el mismo
+    problema que el caso anterior: el tipo no estaba en la tupla de
+    ``_load_config``.
+    """
+    broken = tmp_path / "app.json"
+    broken.write_text(
+        '{"marker_thickness_mm": 2.0, "marker_layout": [1, 2, 3, 4]}', encoding="utf-8"
+    )
+    assert main(["--config", str(broken)]) == 1
+    err = capsys.readouterr().err
+    assert "config" in err.lower()
+    assert str(broken) in err
+    assert "could not be read" in err
+    assert "Traceback" not in err
+
+
 def test_main_reports_a_clear_error_when_the_marker_layout_is_missing(tmp_path, capsys):
     """Sin ``marker_layout`` el lienzo no se puede dimensionar.
 
