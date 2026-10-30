@@ -102,18 +102,34 @@ def test_main_reports_a_clear_error_when_config_is_missing(tmp_path, capsys):
     captured = capsys.readouterr()
     assert "config" in captured.err.lower()
     assert str(missing) in captured.err
+    # Distingue este fallo del de "la config existe pero no se puede leer":
+    # son acciones distintas para el operador (escribir el archivo vs.
+    # arreglarlo), y un mensaje que vale para los dos no sirve para ninguno.
+    assert "not found" in captured.err
     assert captured.out == ""
 
 
 def test_main_reports_a_clear_error_when_the_config_cannot_be_parsed(tmp_path, capsys):
     """Una config con JSON roto (o sin ``marker_thickness_mm``, que no tiene
-    default porque hay que MEDIRLO) no puede llegar como traceback."""
+    default porque hay que MEDIRLO) no puede llegar como traceback.
+
+    Las dos ultimas aserciones son las que hacen que este test DISCRIMINE
+    (Finding 3 de la ronda 1 de revision). Con solo ``"config" in err`` y la
+    ruta, una implementacion que emitiera el mensaje de ARCHIVO AUSENTE para
+    un archivo que si existe pasaba las dos: el operador leeria "measure the
+    rig and write it first" sobre un archivo que ya escribio, y se pondria a
+    buscar un problema que no existe. Se afirma el fragmento propio de este
+    camino Y la ausencia del fragmento del otro -- una sola de las dos deja
+    pasar la mitad de la confusion.
+    """
     broken = tmp_path / "app.json"
     broken.write_text("{not json", encoding="utf-8")
     assert main(["--config", str(broken)]) == 1
     err = capsys.readouterr().err
     assert "config" in err.lower()
     assert str(broken) in err
+    assert "could not be read" in err
+    assert "not found" not in err
 
 
 def test_main_reports_a_clear_error_when_the_marker_layout_is_missing(tmp_path, capsys):
@@ -137,13 +153,50 @@ def test_main_reports_a_clear_error_when_the_marker_layout_is_missing(tmp_path, 
 
 
 def test_main_reports_a_clear_error_when_the_intrinsics_file_is_missing(tmp_path, capsys):
+    """``open_capture`` se inyecta aunque este camino no llegue a la camara.
+
+    Finding 4 de la ronda 1 de revision: sin la inyeccion, este test era
+    determinista SOLO por el orden de arranque actual (intrinsecos antes que
+    camara). Si ese orden regresara, el test abriria el dispositivo real
+    durante la bateria -- pasaria en una maquina con camara en el indice 0 y
+    fallaria en una sin ella, que es exactamente lo que "los tests no
+    requieren camara" existe para evitar. Con el capture falso, el resultado
+    no depende del orden ni del hardware.
+    """
     cfg_path = _write_valid_config(tmp_path)
     missing = tmp_path / "no-intrinsics.json"
-    exit_code = main(["--config", str(cfg_path), "--intrinsics", str(missing)])
+    exit_code = main(
+        ["--config", str(cfg_path), "--intrinsics", str(missing)],
+        open_capture=lambda index, **kwargs: FakeCapture(),
+    )
     assert exit_code == 1
     err = capsys.readouterr().err
     assert "intrinsic" in err.lower()
     assert str(missing) in err
+    assert "not found" in err
+
+
+def test_main_reports_a_clear_error_when_the_intrinsics_file_is_incomplete(tmp_path, capsys):
+    """Unos intrinsecos a los que les falta un campo tampoco son un traceback.
+
+    ``Intrinsics.load`` INDEXA el JSON (``data["camera_matrix"]``), asi que
+    un archivo incompleto lanza ``KeyError`` -- que no es ni ``ValueError``
+    ni ``TypeError``, los tipos que basta enumerar para ``AppConfig.load``.
+    Sin ``KeyError`` en la tupla de ``_load_intrinsics`` este camino llega
+    al operador como traceback.
+    """
+    cfg_path = _write_valid_config(tmp_path)
+    incomplete = tmp_path / "intrinsics.json"
+    incomplete.write_text('{"rms_px": 0.21}', encoding="utf-8")
+    exit_code = main(
+        ["--config", str(cfg_path), "--intrinsics", str(incomplete)],
+        open_capture=lambda index, **kwargs: FakeCapture(),
+    )
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "intrinsic" in err.lower()
+    assert "could not be read" in err
+    assert "Traceback" not in err
 
 
 def test_main_reports_a_clear_error_when_the_camera_cannot_be_opened(tmp_path, capsys):

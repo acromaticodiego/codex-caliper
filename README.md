@@ -61,12 +61,28 @@ no measurement is ever reported without a valid calibration.
 
 ```bash
 py -3.11 -m venv .venv
-.venv/Scripts/python.exe -m pip install -e ".[dev]"
 ```
 
-Python 3.11, Windows 11. `ultralytics` pulls in `torch` (about 2.5 GB); everything except
-the detector itself works without it, and the entry point tells you plainly if it is
-missing rather than failing with an import traceback.
+What to install next depends on what you want to do:
+
+| You want to | Install |
+|---|---|
+| Read the code | `.venv/Scripts/python.exe -m pip install -e .` |
+| Run the tests (262 of them) | `.venv/Scripts/python.exe -m pip install -e ".[dev]"` |
+| Run it live against the rig | `.venv/Scripts/python.exe -m pip install -e ".[dev,live]"` |
+
+The base install (`opencv-python`, `numpy`, `scipy`, `scikit-image`, `PySide6`, `pandas`)
+is enough to read the code with every import resolving. `dev` adds `pytest` and
+`pytest-qt` — enough to run the full suite. `live` adds `ultralytics`, the only thing that
+pulls in `torch` (about 2.5 GB): it is not a base dependency because its import is lazy
+(see `detection.py`), and the full test suite runs without it by injecting a fake model.
+Reading the code or running the tests never pays that cost; pointing the app at a real
+camera does. If the `live` extra is missing, the entry point says so plainly rather than
+failing with an import traceback.
+
+Developed and tested on Python 3.11, Windows 11. `pyproject.toml` declares
+`requires-python = ">=3.10"` as the real floor; 3.10 and 3.12+ are untested, not known to
+be broken.
 
 Run it:
 
@@ -358,6 +374,19 @@ Said out loud, with numbers, because hiding them would cost more credibility tha
   still matches. This is why step 5 says to tighten the set screws and mark the rings with
   paint, and why you should check the marks before each session.
 
+- **The in-app "Calibrate camera" screen cannot originate a calibration.** It is wired to
+  display one: the toggle shows the before/after of `undistort` against whatever
+  intrinsics are already loaded, and `IntrinsicCalibrationView` itself has working
+  `capture_pose`/`set_live_frame`/`run_calibration` methods with their own tests. What is
+  missing is the wiring between it and the running app — `main_window.py` instantiates the
+  view and connects its `calibration_accepted` signal to unlock measurement, but nothing
+  ever calls `set_live_frame` or `capture_pose` on it, there is no button to capture a
+  pose, and there is no method to save a result to disk. Open the screen and it says "No
+  frame yet" forever; click "Run calibration" and it reports "Cannot calibrate yet",
+  because no pose was ever captured for it to work with. The real path to an intrinsics
+  file is step 9 above — the script against `codex_caliper.intrinsics` directly, which is
+  complete and does the whole job.
+
 - **Measurement does not run at 30 fps, and does not need to.** `medial_axis_path` alone
   costs ~11 ms per banana, which is the entire per-banana budget at 30 fps. What the viewer
   sees moving at 30 fps is the warp and the overlay; the measurement settles over a 30-frame
@@ -407,7 +436,7 @@ have real numbers behind them.
 .venv/Scripts/python.exe -m pytest
 ```
 
-261 tests, no camera and no `ultralytics` required: every test that touches the camera
+262 tests, no camera and no `ultralytics` required: every test that touches the camera
 injects a fake `VideoCapture`, and every test that touches the detector injects a fake
 model.
 

@@ -12,12 +12,19 @@ dependencies = [
     "numpy>=2.0",
     "scipy",
     "scikit-image",
-    "ultralytics",
     "PySide6",
     "pandas",
 ]
 
 [project.optional-dependencies]
+# Backend de deteccion. Obligatorio para medir en vivo; fuera de las
+# dependencias base porque arrastra torch (~2.5 GB) y nada mas del paquete
+# lo necesita: el import de ultralytics es perezoso (ver detection.py) y la
+# bateria completa de tests corre sin el, inyectando un modelo falso. Asi,
+# quien clona el repo para leerlo o para correr los tests no paga 2.5 GB.
+live = [
+    "ultralytics",
+]
 dev = [
     "pytest",
     "pytest-qt",

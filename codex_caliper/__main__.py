@@ -99,12 +99,18 @@ def _load_config(path: Path) -> AppConfig:
         )
     try:
         return AppConfig.load(path)
-    except Exception as exc:
-        # Deliberadamente ancho: un JSON roto da ValueError, una clave que
-        # falta o sobra da TypeError desde el constructor del dataclass, y
-        # un archivo ilegible da OSError. Para el operador son el mismo
-        # problema ("esta config no sirve, y esto es lo que esta mal"), y
-        # ninguno de los tres puede salir como traceback.
+    except (OSError, ValueError, TypeError) as exc:
+        # Los tres tipos que una config mala puede producir, enumerados en
+        # vez de un ``except Exception``: un JSON roto da ``ValueError``
+        # (``JSONDecodeError`` hereda de el), una clave que falta o sobra da
+        # ``TypeError`` desde el constructor del dataclass, y un archivo
+        # ilegible da ``OSError``. Para el operador son el mismo problema
+        # ("esta config no sirve, y esto es lo que esta mal") y ninguno
+        # puede salir como traceback -- pero un ``AttributeError`` dentro de
+        # ``AppConfig.load`` es un BUG, no una config mala, y tiene que
+        # verse como bug. Este proyecto ya pago por un except ciego (Task 8:
+        # ``np.trapezoid`` sin piso de numpy devolviendo ``None`` para
+        # siempre, en silencio).
         raise _StartupError(f"config file {path} could not be read: {exc}") from exc
 
 
@@ -143,7 +149,14 @@ def _load_intrinsics(path: Path) -> Intrinsics:
         )
     try:
         return Intrinsics.load(path)
-    except Exception as exc:
+    except (OSError, KeyError, ValueError, TypeError) as exc:
+        # La tupla incluye ``KeyError``, que la de ``_load_config`` no
+        # necesita: ``Intrinsics.load`` INDEXA el JSON
+        # (``data["camera_matrix"]``, ``data["rms_px"]``, ...), asi que un
+        # archivo de intrinsecos al que le falta un campo lanza
+        # ``KeyError``, no ``TypeError``. ``AppConfig.load`` en cambio
+        # expande con ``cls(**data)`` y ahi la clave ausente llega como
+        # ``TypeError`` del constructor.
         raise _StartupError(f"intrinsics file {path} could not be read: {exc}") from exc
 
 
