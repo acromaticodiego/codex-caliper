@@ -56,7 +56,7 @@ import dataclasses
 import numpy as np
 
 from codex_caliper.aggregation import MeasurementAggregator, TrackAggregate
-from codex_caliper.aruco_tools import CalibrationState, detect_markers
+from codex_caliper.aruco_tools import CalibrationState, MarkerDetection, detect_markers
 from codex_caliper.codex import CodexVerdict, evaluate
 from codex_caliper.config import AppConfig
 from codex_caliper.detection import CentroidReassigner, Instance, masks_are_adjacent
@@ -137,6 +137,23 @@ class BananaResult:
     muestra individual. ``mask`` es la mascara refinada, booleana y en
     coordenadas del lienzo rectificado (la misma forma que
     ``FrameResult.rectified``), lista para dibujar encima.
+
+    Geometria para el overlay en vivo (encargo posterior al plan de 20
+    tareas, "haz visible el metodo en el video")
+    -----------------------------------------------------------------------
+    ``contour_px``, ``axis_path_px``, ``axis_tips_px`` y ``outer_curve_px``
+    son exactamente los campos del mismo nombre de ``BananaMeasures``
+    (Task 8, ``geometry/measures.py``) despues de pasar por
+    ``correct_parallax`` -- sin cambios, porque esos cuatro son PIXELES del
+    lienzo, no magnitudes fisicas (ver docstring de ``parallax.py``). Viajan
+    hasta aqui, y no se quedan solo en ``BananaMeasures``, porque
+    ``codex_caliper.ui.overlay`` -- que corre en el hilo de la GUI, por
+    cuadro -- importa ``BananaResult``, no ``BananaMeasures``: este modulo
+    (Task 14) es el unico punto de union entre la cadena de medicion y la
+    interfaz, y el overlay no tiene ninguna razon para conocer el tipo
+    intermedio. Recalcularlos en el overlay en vez de cargarlos hasta aqui
+    costaria ~11 ms/banano (``medial_axis_path``, ver ``medial.py``) EN EL
+    HILO DE LA GUI, cada cuadro -- exactamente el costo que este seam evita.
     """
 
     track_id: int
@@ -144,6 +161,10 @@ class BananaResult:
     verdict: CodexVerdict
     estimated_weight_g: float | None
     mask: np.ndarray
+    contour_px: np.ndarray
+    axis_path_px: np.ndarray
+    axis_tips_px: tuple[np.ndarray, np.ndarray]
+    outer_curve_px: np.ndarray
 
 
 @dataclasses.dataclass
@@ -157,6 +178,17 @@ class FrameResult:
     distorsion no depende de los marcadores), asi que la interfaz siempre
     tiene algo que mostrar. ``results`` esta vacio en todo cuadro no medible;
     ``warnings`` dice por que, en ingles, para mostrarse tal cual.
+
+    ``markers`` son las ``MarkerDetection`` que ``detect_markers`` ya
+    calculo este mismo cuadro (encargo posterior al plan de 20 tareas): el
+    pipeline las calculaba y las tiraba al salir de ``process``, asi que
+    ``draw_marker_overlay`` (Task 17) solo podia dibujarse en pantallas que
+    vuelven a llamar a ``detect_markers`` por su cuenta (``calibration_view``)
+    -- nunca en la vista de video en vivo, que es donde la spec (S13) dice
+    que el video se publica primero. Se exponen SIEMPRE, incluso en el
+    cuadro ``BLOCKED`` de abajo: ahi es exactamente donde el operador (y el
+    espectador del video) necesita ver CUALES marcadores siguen visibles,
+    no solo que la calibracion fallo.
     """
 
     rectified: np.ndarray | None
@@ -164,6 +196,7 @@ class FrameResult:
     plane: PlaneCalibration | None
     results: list[BananaResult]
     warnings: list[str]
+    markers: list[MarkerDetection]
 
 
 class Pipeline:
@@ -236,6 +269,7 @@ class Pipeline:
                 plane=None,
                 results=[],
                 warnings=warnings,
+                markers=detections,
             )
 
         if plane.state is CalibrationState.DEGRADED:
@@ -291,6 +325,7 @@ class Pipeline:
                 plane=plane,
                 results=[],
                 warnings=warnings,
+                markers=detections,
             )
 
         results: list[BananaResult] = []
@@ -326,6 +361,10 @@ class Pipeline:
                     verdict=evaluate(aggregate.length_mm, aggregate.caliper_mm),
                     estimated_weight_g=self._weight_g(aggregate.volume_mm3),
                     mask=refined,
+                    contour_px=measures.contour_px,
+                    axis_path_px=measures.axis_path_px,
+                    axis_tips_px=measures.axis_tips_px,
+                    outer_curve_px=measures.outer_curve_px,
                 )
             )
 
@@ -335,6 +374,7 @@ class Pipeline:
             plane=plane,
             results=results,
             warnings=warnings,
+            markers=detections,
         )
 
     def _weight_g(self, volume_mm3: float) -> float | None:

@@ -39,6 +39,7 @@ from codex_caliper.codex import CODEX_MIN_CALIPER_MM, CODEX_MIN_LENGTH_MM
 from codex_caliper.config import AppConfig
 from codex_caliper.detection import BananaDetector, YOLO_BANANA_CLASS_ID
 from codex_caliper.geometry.measures import measure_mask
+from codex_caliper.geometry.outline import smoothed_arc_length_mm
 from codex_caliper.homography import DegenerateMarkerLayout, canvas_size_for
 from codex_caliper.intrinsics import Intrinsics
 from codex_caliper.pipeline import (
@@ -478,6 +479,111 @@ def test_end_to_end_without_parallax_correction_recovers_outer_length_ground_tru
     assert result.mask.dtype == bool
     assert result.mask.shape == r.rectified.shape[:2]
     assert np.count_nonzero(result.mask) > 0
+
+
+# ---------------------------------------------------------------------------
+# Geometria del overlay en vivo en ``BananaResult`` (encargo posterior al
+# plan de 20 tareas): el pipeline tiene que entregar la geometria de
+# PIXEL que ``measure_mask`` ya calculo, no descartarla ni recalcularla.
+# ---------------------------------------------------------------------------
+
+
+def test_banana_result_carries_the_pixel_geometry_measure_mask_computed(
+    sharp_scene, sharp_cfg
+):
+    """``BananaResult.outer_curve_px`` tiene que ser literalmente la curva
+    que produjo ``aggregate.length_mm`` de este mismo cuadro, no una
+    aproximacion ni un placeholder vacio.
+
+    Con una sola muestra (``aggregate.samples == 1``) la mediana del
+    agregado es exactamente la medida cruda de este cuadro, asi que
+    recalcular la longitud suavizada SOBRE ``outer_curve_px`` tiene que
+    reproducir ``aggregate.length_mm`` al bit (misma funcion,
+    ``smoothed_arc_length_mm``, sobre los mismos pixeles) -- con
+    ``correct_parallax=False`` para que nada reescale el agregado lejos de
+    la medida cruda que esos pixeles describen. Una implementacion que
+    dejara estos campos vacios (regresion del seam Task 14 -> overlay) o
+    que les asignara la geometria SIN RECORTAR (``full_outer`` en vez de
+    ``outer`` dentro de ``measure_mask``) fallaria esta prueba: vacio no
+    tiene puntos que medir, y sin recortar mide mas que el fruto.
+    """
+    pipeline, _detector = _build(sharp_scene, sharp_cfg, correct_parallax=False)
+    r = pipeline.process(sharp_scene)
+    assert len(r.results) == 1
+    result = r.results[0]
+    mm_per_px = r.plane.mm_per_px
+
+    assert len(result.contour_px) >= 2
+    assert len(result.axis_path_px) >= 2
+    assert len(result.outer_curve_px) >= 2
+
+    recomputed_length_mm = smoothed_arc_length_mm(result.outer_curve_px, mm_per_px)
+    assert recomputed_length_mm == pytest.approx(result.aggregate.length_mm, rel=1e-9)
+
+    # La curva Codex (recortada) nunca puede ser mas larga que el contorno
+    # ENTERO de la mascara (que incluye las dos cadenas, exterior e
+    # interior, mas el pedicelo si lo hay): es un sub-tramo de una de las
+    # dos, nunca el total.
+    assert len(result.outer_curve_px) < len(result.contour_px)
+
+
+def test_pixel_geometry_is_not_rescaled_by_the_parallax_correction(sharp_scene, sharp_cfg):
+    """``contour_px``/``axis_path_px``/``axis_tips_px``/``outer_curve_px``
+    son posiciones de PIXEL del lienzo rectificado -- ``parallax.py`` dice
+    explicitamente que no los toca, porque el paralaje corrige magnitudes
+    FISICAS, no la grilla de pixeles con la que ya se dibujo la escena
+    (ver docstring de ese modulo). Esta prueba lo verifica desde afuera de
+    ``parallax.py``: dos pipelines sobre la MISMA escena, uno con la
+    correccion encendida y otro apagada, tienen que coincidir PIXEL A PIXEL
+    en la geometria pero DIFERIR en ``aggregate.length_mm`` -- si alguien
+    reescalara los pixeles igual que los escalares, las dos geometrias
+    dejarian de coincidir.
+    """
+    pipeline_corrected, _ = _build(sharp_scene, sharp_cfg, correct_parallax=True)
+    pipeline_raw, _ = _build(sharp_scene, sharp_cfg, correct_parallax=False)
+
+    corrected = pipeline_corrected.process(sharp_scene).results[0]
+    raw = pipeline_raw.process(sharp_scene).results[0]
+
+    assert corrected.aggregate.length_mm != pytest.approx(raw.aggregate.length_mm)
+    assert np.array_equal(corrected.contour_px, raw.contour_px)
+    assert np.array_equal(corrected.axis_path_px, raw.axis_path_px)
+    assert np.array_equal(corrected.axis_tips_px[0], raw.axis_tips_px[0])
+    assert np.array_equal(corrected.outer_curve_px, raw.outer_curve_px)
+
+
+# ---------------------------------------------------------------------------
+# ``FrameResult.markers`` (encargo posterior al plan de 20 tareas): el
+# pipeline ya calcula ``detect_markers`` y lo tiraba al salir de
+# ``process``, asi que la vista en vivo nunca podia mostrar los
+# marcadores que sostienen la calibracion. Se exponen en TODOS los
+# caminos de salida, incluido el ``BLOCKED``.
+# ---------------------------------------------------------------------------
+
+
+def test_frame_result_exposes_the_markers_it_already_detected(sharp_scene, sharp_cfg):
+    pipeline, _ = _build(sharp_scene, sharp_cfg, correct_parallax=False)
+    r = pipeline.process(sharp_scene)
+    assert {d.id for d in r.markers} == set(sharp_cfg.marker_ids)
+
+
+def test_markers_survive_a_degraded_frame(sharp_scene, sharp_cfg):
+    degraded_scene = _hide_markers(sharp_scene, sharp_cfg, [3])
+    pipeline, _ = _build(degraded_scene, sharp_cfg, correct_parallax=False)
+    r = pipeline.process(degraded_scene)
+    assert {d.id for d in r.markers} == {1, 2, 4}
+
+
+def test_markers_survive_even_a_blocked_frame_with_no_results(sharp_scene, sharp_cfg):
+    # El caso que mas importa para el operador/espectador: la calibracion
+    # fallo y ``results`` esta vacio, pero los marcadores que SI siguen
+    # visibles tienen que seguir llegando -- es exactamente la informacion
+    # que explica POR QUE bloqueo, no solo QUE bloqueo.
+    blocked_scene = _hide_markers(sharp_scene, sharp_cfg, [3, 4])
+    pipeline, _ = _build(blocked_scene, sharp_cfg, correct_parallax=False)
+    r = pipeline.process(blocked_scene)
+    assert r.results == []
+    assert {d.id for d in r.markers} == {1, 2}
 
 
 def test_end_to_end_error_decomposes_into_pristine_and_warp_chain_bias(

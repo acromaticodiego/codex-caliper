@@ -292,6 +292,40 @@ class BananaMeasures:
     abscisa esta en milimetros reales, ya corregida del sesgo de escalera
     del esqueleto en Task 6. Se llama asi, distinto de ``width_profile_mm``
     (la funcion de Task 6), para no chocar con ella.
+
+    Geometria para el overlay en vivo (encargo posterior al plan de 20
+    tareas, "haz visible el metodo en el video")
+    -----------------------------------------------------------------------
+    Los cuatro campos de abajo son PIXELES en el lienzo rectificado (la
+    misma convencion ``(x, y)`` que el resto de ``geometry/``), no
+    milimetros. Existen para que ``codex_caliper.ui.overlay`` pueda dibujar
+    sobre el video sin RECALCULAR esta geometria en el hilo de la GUI --
+    ``medial_axis_path`` sola cuesta ~11 ms por banano (ver ``medial.py``),
+    que a 30 fps con varios frutos por cuadro agota el presupuesto de
+    cuadro. Cada uno es exactamente un valor local que ``measure_mask`` YA
+    calculaba y hasta ahora descartaba al retornar:
+
+    - ``contour_px``: el contorno EXTERIOR completo de la mascara (``N, 2``,
+      cerrado), tal como lo entrega ``_largest_contour_px`` -- incluye el
+      pedicelo si la mascara lo incluye. Es el borde fino que demuestra que
+      la segmentacion es un contorno preciso, no una caja.
+    - ``axis_path_px``: el eje medial PODADO completo (``medial_axis_path``,
+      Task 6), de punta a punta de la MASCARA (no del fruto recortado) --
+      la linea de "adelgazamiento" que corre por el centro del banano.
+    - ``axis_tips_px``: las dos puntas de ``axis_path_px`` (mismo objeto que
+      ``MedialAxis.tips_px``). Son los extremos de la CUERDA punta a punta
+      -- el contraste visual directo contra la curva Codex de abajo, y lo
+      que una prueba de este overlay debe anclar (no un punto inventado).
+    - ``outer_curve_px``: la curva exterior YA RECORTADA al tramo del fruto
+      (lo mismo que ``_restrict_outer_to_fruit`` devuelve y que
+      ``smoothed_arc_length_mm`` mide para producir ``codex_length_mm``) --
+      la curva protagonista del overlay, porque es LITERALMENTE la
+      geometria detras del numero que el panel reporta.
+
+    Ninguno de los cuatro participa en ``correct_measures`` (Task 9,
+    parallax.py): son posiciones de PIXEL en el lienzo, no magnitudes
+    fisicas en mm, y ``dataclasses.replace`` los deja pasar sin tocar (ver
+    docstring de ese modulo).
     """
 
     codex_length_mm: float
@@ -299,6 +333,10 @@ class BananaMeasures:
     area_mm2: float
     volume_mm3: float
     width_profile: tuple[np.ndarray, np.ndarray]
+    contour_px: np.ndarray
+    axis_path_px: np.ndarray
+    axis_tips_px: tuple[np.ndarray, np.ndarray]
+    outer_curve_px: np.ndarray
 
 
 def _smooth(w_mm: np.ndarray, s_mm: np.ndarray, window_mm: float) -> np.ndarray:
@@ -590,6 +628,13 @@ def measure_mask(mask: np.ndarray, mm_per_px: float, cfg: AppConfig) -> BananaMe
     futuro en esta cadena en el mismo ``None`` silencioso que una mascara
     degenerada). No lanza una excepcion por degeneracion geometrica; SI la
     lanza si una llamada interna falla por cualquier otro motivo.
+
+    ``contour``, ``axis`` y ``outer`` (las variables locales de esta misma
+    cadena) viajan en el resultado como ``contour_px``, ``axis_path_px``,
+    ``axis_tips_px`` y ``outer_curve_px`` -- ver docstring de
+    ``BananaMeasures``. No se recalculan en ningun otro sitio: el overlay
+    en vivo (``codex_caliper.ui.overlay``) los consume tal cual, que es
+    justamente por lo que viajan en vez de descartarse como antes.
     """
     if touches_border(mask, cfg.border_margin_px):
         return None
@@ -634,4 +679,8 @@ def measure_mask(mask: np.ndarray, mm_per_px: float, cfg: AppConfig) -> BananaMe
         area_mm2=area_mm2,
         volume_mm3=volume_mm3,
         width_profile=(s_mm, w_mm),
+        contour_px=contour,
+        axis_path_px=axis.path_px,
+        axis_tips_px=axis.tips_px,
+        outer_curve_px=outer,
     )

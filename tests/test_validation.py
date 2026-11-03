@@ -52,13 +52,19 @@ def measures(
     area: float = 900.0,
     volume: float = 45_000.0,
 ) -> BananaMeasures:
-    """Construye un ``BananaMeasures`` minimo; ``width_profile`` no participa aqui."""
+    """Construye un ``BananaMeasures`` minimo; ``width_profile`` no participa
+    aqui, ni la geometria de pixel del overlay en vivo (encargo posterior
+    al plan de 20 tareas)."""
     return BananaMeasures(
         codex_length_mm=length,
         caliper_mm=caliper,
         area_mm2=area,
         volume_mm3=volume,
         width_profile=(np.array([]), np.array([])),
+        contour_px=np.empty((0, 2)),
+        axis_path_px=np.empty((0, 2)),
+        axis_tips_px=(np.zeros(2), np.zeros(2)),
+        outer_curve_px=np.empty((0, 2)),
     )
 
 

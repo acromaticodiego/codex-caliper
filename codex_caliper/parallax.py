@@ -209,6 +209,16 @@ def correct_measures(
     unidades corregidas que los escalares y recalcular area o volumen a
     partir de el de los mismos numeros -- ver docstring del modulo.
 
+    ``contour_px``, ``axis_path_px``, ``axis_tips_px`` y ``outer_curve_px``
+    (geometria del overlay en vivo, encargo posterior al plan de 20 tareas)
+    NO se tocan aqui: son posiciones de PIXEL en el lienzo rectificado, no
+    magnitudes fisicas en mm -- el paralaje corrige la escena, no la grilla
+    de pixeles con la que ya se dibujo esa escena. ``dataclasses.replace``
+    los deja pasar sin nombrarlos, que es precisamente el motivo de usar
+    ``replace`` y no reconstruir el dataclass campo por campo: un consumidor
+    futuro que agregue un quinto campo de geometria no tiene que volver a
+    tocar esta funcion para que tambien sobreviva la correccion.
+
     Devuelve ``None`` sin lanzar si ``measures`` es ``None`` (mascara
     degenerada rio arriba, Task 8): una correccion aplicada a algo que no
     se pudo medir no es un error, es la misma ausencia de medida

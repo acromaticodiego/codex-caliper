@@ -12,6 +12,26 @@ hace cumplir uno de los dos anti-objetivos que este modulo puede violar por
 si solo (S4) -- no reportar una cifra sin su incertidumbre, y no mostrar mas
 decimales de los que la calibracion sostiene.
 
+El metodo tambien se hace VISIBLE, no solo el numero (encargo posterior al
+plan de 20 tareas)
+-----------------------------------------------------------------------------
+Hasta aqui ``draw_results`` solo dibujaba texto: el contorno, el eje medial
+y la curva Codex se calculaban (Tasks 6-8) y se descartaban sin pintarse en
+ningun lado, asi que todo el metodo -- deteccion, rectificacion,
+segmentacion, esqueletizacion, medicion de arco -- quedaba invisible en el
+video, exactamente lo que un demo en vivo no puede permitirse ("que la
+persona que vea esto vea la implementacion, no que quede tras bambalinas").
+``_draw_geometry`` dibuja, por cada ``BananaResult``, en orden de MENOS a
+MAS protagonista: el contorno fino de la mascara, el eje medial completo,
+la cuerda punta a punta PUNTEADA (el contraste directo), y por ultimo --
+encima de las otras tres -- la curva Codex con halo, la cantidad que el
+panel reporta como ``L``. Ningun paso recalcula geometria: ``BananaResult``
+ya la carga desde ``measure_mask`` (Task 8) via el pipeline (Task 14, ver
+sus docstrings), porque recalcular el eje medial en este hilo -- el de la
+GUI, por cuadro -- cuesta ~11 ms/banano (ver ``geometry/medial.py``) y
+pondria la fluidez del video en riesgo por el mismo overlay que existe
+para demostrarlo.
+
 Piso de incertidumbre (Ruling 2 del encargo)
 ---------------------------------------------
 ``aggregation.py`` calcula la desviacion con ``np.std`` sin ``ddof``, asi
@@ -100,6 +120,46 @@ _MARKER_COLORS = {
     CalibrationState.DEGRADED: (0, 165, 255),
     CalibrationState.BLOCKED: (40, 40, 230),
 }
+
+# ---------------------------------------------------------------------------
+# Geometria del metodo (encargo posterior al plan de 20 tareas): contorno,
+# eje medial, cuerda y curva Codex -- ver docstring de ``_draw_geometry``
+# para la jerarquia visual completa.
+#
+# Jerarquia de PESO, no solo de color (restriccion del encargo: esto se
+# dibuja sobre un banano amarillo saturado contra una tarjeta blanca, asi
+# que el color SOLO no puede cargar la distincion):
+#
+#   contorno (1px, gris neutro)  <  eje medial (1px, acero)
+#   <  cuerda (1px, acero, PUNTEADA)  <  curva Codex (3px + halo negro, celeste)
+#
+# La curva Codex es la PROTAGONISTA (asi lo pide el encargo explicitamente):
+# es la unica con halo y la mas gruesa, y se dibuja ULTIMA (encima de las
+# otras tres) en ``_draw_geometry``. El contorno y el eje comparten la
+# region tonal "acero/gris" porque son evidencia de apoyo -- la FORMA ya los
+# distingue (uno bordea la mascara, el otro la cruza por el centro), asi que
+# no hace falta gastar un segundo tono saturado en diferenciarlos. La cuerda
+# reusa el mismo acero que el eje (sus puntas SON las puntas del eje, Ruling
+# de pruebas de esta tarea) pero PUNTEADA: el patron de guiones, no el
+# color, es lo que la separa visualmente de la curva Codex solida.
+_COLOR_CONTOUR = (130, 130, 130)
+_CONTOUR_THICKNESS_PX = 1
+
+_COLOR_AXIS = (150, 95, 60)
+_AXIS_THICKNESS_PX = 1
+
+_COLOR_CHORD = (150, 95, 60)
+_CHORD_THICKNESS_PX = 1
+_CHORD_DASH_PX = 14
+_CHORD_GAP_PX = 9
+
+#: Celeste vivo: no colisiona con el verde/rojo/naranja ya reservados para
+#: veredicto/calibracion (``_COLOR_PASS``, ``_COLOR_FAIL``, ``_MARKER_COLORS``)
+#: y contrasta con fuerza contra el amarillo de la fruta (complementario) y
+#: contra la tarjeta blanca.
+_COLOR_CODEX_CURVE = (225, 155, 15)
+_CODEX_CURVE_THICKNESS_PX = 3
+_CODEX_CURVE_HALO_THICKNESS_PX = 6
 
 
 def format_measurement(value_mm: float, std_mm: float, floor_mm: float = _CANVAS_MM_PER_PX) -> str:
@@ -310,6 +370,146 @@ def _draw_outlined_text(canvas: np.ndarray, text: str, origin: tuple[int, int], 
     cv2.putText(canvas, text, origin, _FONT, _FONT_SCALE, color, _TEXT_THICKNESS, cv2.LINE_AA)
 
 
+def _as_point_list(path_px: np.ndarray) -> np.ndarray | None:
+    """Convierte ``path_px`` al formato ``(N, 1, 2)`` entero que piden
+    ``cv2.polylines``/``cv2.drawContours``, o ``None`` si no hay al menos 2
+    puntos (nada que trazar -- la geometria vacia por defecto de un
+    ``BananaResult`` de prueba que no la necesita, Ruling de pruebas de esta
+    tarea, cae exactamente aqui).
+    """
+    if path_px is None or len(path_px) < 2:
+        return None
+    return np.round(np.asarray(path_px, dtype=np.float64)).astype(np.int32).reshape(-1, 1, 2)
+
+
+def _draw_polyline(canvas: np.ndarray, path_px: np.ndarray, color: tuple[int, int, int], thickness: int, *, closed: bool) -> None:
+    """Traza ``path_px`` (pixeles del lienzo, mismo formato que ``MedialAxis.path_px``)
+    como una polilinea simple, sin halo. No hace nada si ``path_px`` no trae
+    al menos 2 puntos.
+
+    ``cv2.LINE_8`` (sin antialiasing), no ``cv2.LINE_AA``: a 1px de grosor
+    -- el de las tres lineas de APOYO que usan este ayudante -- el
+    antialiasing reparte la intensidad entre dos filas/columnas vecinas y
+    ninguna de las dos llega al color pedido (medido: ~90% de intensidad
+    en el canal mas fuerte sobre una linea horizontal perfecta). Eso
+    ademas de verse mas tenue de lo pensado sobre el fondo bananero, hace
+    que ninguna prueba pueda anclar un color exacto. ``cv2.LINE_8`` pinta
+    el pixel exacto al color exacto, sin perder nitidez a 1px -- la misma
+    convencion que ``draw_marker_overlay`` ya usaba.
+    """
+    pts = _as_point_list(path_px)
+    if pts is None:
+        return
+    cv2.polylines(canvas, [pts], closed, color, thickness, cv2.LINE_8)
+
+
+def _draw_haloed_polyline(canvas: np.ndarray, path_px: np.ndarray, color: tuple[int, int, int], thickness: int, halo_thickness: int, *, closed: bool) -> None:
+    """Traza ``path_px`` con un halo negro por debajo -- misma tecnica que
+    ``_draw_outlined_text``, para la curva PROTAGONISTA (ver docstring de
+    ``_draw_geometry``). No hace nada si ``path_px`` no trae al menos 2
+    puntos.
+
+    Esta si usa ``cv2.LINE_AA`` (al reves que ``_draw_polyline``): al
+    grosor de esta curva (``_CODEX_CURVE_THICKNESS_PX = 3``, halo 6) la fila
+    central SI llega al color exacto pedido -- medido -- porque el trazo es
+    lo bastante ancho para que el antialiasing quede confinado a sus dos
+    bordes, no al centro. Vale la suavidad del trazo AA en la curva que mas
+    se nota, sin pagar el costo de intensidad parcial que si paga un trazo
+    de 1px.
+    """
+    pts = _as_point_list(path_px)
+    if pts is None:
+        return
+    cv2.polylines(canvas, [pts], closed, (0, 0, 0), halo_thickness, cv2.LINE_AA)
+    cv2.polylines(canvas, [pts], closed, color, thickness, cv2.LINE_AA)
+
+
+def _draw_dashed_line(canvas: np.ndarray, point_a: np.ndarray, point_b: np.ndarray, color: tuple[int, int, int], thickness: int, dash_px: float, gap_px: float) -> None:
+    """Traza un segmento PUNTEADO entre ``point_a`` y ``point_b``.
+
+    ``cv2`` no trae una primitiva de linea discontinua; se recorre el
+    segmento a pasos de ``dash_px``/``gap_px`` alternando trazo y hueco. El
+    numero de pasos es ``longitud / dash_px`` -- unas pocas decenas para la
+    cuerda tipica de un banano -- asi que el costo es insignificante frente
+    al resto del dibujo del cuadro (ver reporte de la tarea para la medicion
+    real). No hace nada si los dos puntos practicamente coinciden (cuerda
+    degenerada: el sentinela de pruebas ``(np.zeros(2), np.zeros(2))`` cae
+    aqui, a proposito, para que un ``BananaResult`` sin geometria no dibuje
+    una cuerda fantasma en el origen del lienzo).
+    """
+    start = np.asarray(point_a, dtype=np.float64)
+    end = np.asarray(point_b, dtype=np.float64)
+    delta = end - start
+    length = float(np.linalg.norm(delta))
+    if length < 1.0:
+        return
+    direction = delta / length
+
+    distance = 0.0
+    drawing = True
+    while distance < length:
+        segment_len = dash_px if drawing else gap_px
+        next_distance = min(distance + segment_len, length)
+        if drawing:
+            seg_start = start + direction * distance
+            seg_end = start + direction * next_distance
+            cv2.line(
+                canvas,
+                tuple(np.round(seg_start).astype(int)),
+                tuple(np.round(seg_end).astype(int)),
+                color,
+                thickness,
+                cv2.LINE_8,  # mismo motivo que ``_draw_polyline``: color exacto a 1px
+            )
+        distance = next_distance
+        drawing = not drawing
+
+
+def _draw_geometry(canvas: np.ndarray, result: BananaResult) -> None:
+    """Dibuja la geometria del METODO para ``result``, sobre ``canvas`` (que
+    ``draw_results`` ya sabe que es una copia).
+
+    Encargo posterior al plan de 20 tareas: "que la persona que vea esto
+    vea la implementacion, no que quede tras bambalinas" -- antes de esta
+    funcion ``draw_results`` solo dibujaba texto, y el metodo entero
+    (segmentacion, eje medial, curva Codex) era invisible en el video.
+
+    Jerarquia visual, de MENOS a MAS protagonista (ver constantes de
+    modulo para el porque de cada peso/color) -- y por eso se dibuja en
+    ESE orden: cada capa queda por debajo de la siguiente, asi que la curva
+    Codex, la mas importante, nunca queda tapada por una de apoyo:
+
+    1. ``contour_px`` -- el contorno fino de la mascara (demuestra que la
+       segmentacion es un borde preciso, no una caja).
+    2. ``axis_path_px`` -- el eje medial completo (la linea de
+       "adelgazamiento").
+    3. ``axis_tips_px`` -- la cuerda punta a punta, PUNTEADA: el contraste
+       directo contra la curva Codex, lo que vuelve visible en un segundo
+       que el CODEX mide mas que la cuerda recta.
+    4. ``outer_curve_px`` -- la curva Codex recortada al fruto, con halo:
+       la PROTAGONISTA, literalmente la geometria detras de ``L`` en la
+       etiqueta de este mismo resultado.
+
+    Cualquiera de los cuatro puede venir vacio (un ``BananaResult`` de
+    prueba sin geometria, o -- en produccion -- nunca, porque
+    ``Pipeline.process`` siempre los puebla desde ``measure_mask``): cada
+    ayudante de dibujo no hace nada ante una entrada vacia, asi que esta
+    funcion no necesita chequear longitud ella misma.
+    """
+    _draw_polyline(canvas, result.contour_px, _COLOR_CONTOUR, _CONTOUR_THICKNESS_PX, closed=True)
+    _draw_polyline(canvas, result.axis_path_px, _COLOR_AXIS, _AXIS_THICKNESS_PX, closed=False)
+    tip_a, tip_b = result.axis_tips_px
+    _draw_dashed_line(canvas, tip_a, tip_b, _COLOR_CHORD, _CHORD_THICKNESS_PX, _CHORD_DASH_PX, _CHORD_GAP_PX)
+    _draw_haloed_polyline(
+        canvas,
+        result.outer_curve_px,
+        _COLOR_CODEX_CURVE,
+        _CODEX_CURVE_THICKNESS_PX,
+        _CODEX_CURVE_HALO_THICKNESS_PX,
+        closed=False,
+    )
+
+
 def draw_results(canvas: np.ndarray, results: list[BananaResult], mm_per_px: float) -> np.ndarray:
     """Dibuja las cotas de cada banano SOBRE una copia del lienzo rectificado.
 
@@ -323,6 +523,10 @@ def draw_results(canvas: np.ndarray, results: list[BananaResult], mm_per_px: flo
     pueden llegar en cualquier orden y cada rotulo tiene que seguir al
     banano que describe, no al indice con el que llego este frame (spec
     S8: "los numeros siguen a los bananos cuando se mueven con la mano").
+    La geometria del metodo (``_draw_geometry``, encargo posterior al plan
+    de 20 tareas) sigue la MISMA regla por la MISMA razon: cada contorno,
+    eje y curva se dibuja con la mascara/geometria PROPIA de ``result``,
+    nunca con la de otro elemento de la lista.
 
     Nota sobre glifos: el mockup de la spec (S8) usa "✓" y "⌀" y una barra
     "▓▓▓░". ``cv2.putText`` usa las fuentes vectoriales Hershey de OpenCV,
@@ -337,6 +541,7 @@ def draw_results(canvas: np.ndarray, results: list[BananaResult], mm_per_px: flo
     """
     out = canvas.copy()
     for result in results:
+        _draw_geometry(out, result)
         lines = compose_label_lines(result, mm_per_px)
         color = _label_color(result)
         x, y = text_anchor_for(result.mask)

@@ -68,7 +68,9 @@ def measures(
     """Construye un ``BananaMeasures`` minimo para las pruebas de este modulo.
 
     ``width_profile`` no participa en la agregacion temporal, asi que se
-    deja vacio.
+    deja vacio -- lo mismo para la geometria de pixel del overlay en vivo
+    (``contour_px``/``axis_path_px``/``axis_tips_px``/``outer_curve_px``,
+    encargo posterior al plan de 20 tareas): ninguna se mide aqui.
     """
     return BananaMeasures(
         codex_length_mm=length,
@@ -76,6 +78,10 @@ def measures(
         area_mm2=area,
         volume_mm3=volume,
         width_profile=(np.array([]), np.array([])),
+        contour_px=np.empty((0, 2)),
+        axis_path_px=np.empty((0, 2)),
+        axis_tips_px=(np.zeros(2), np.zeros(2)),
+        outer_curve_px=np.empty((0, 2)),
     )
 
 

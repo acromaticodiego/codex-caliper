@@ -184,7 +184,12 @@ class ValidationView(QWidget):
         docstring del modulo para por que, en vez de fabricar cualquiera de
         los dos. ``codex_length_mm``, ``caliper_mm`` y ``volume_mm3`` son
         exactamente los campos que ``TrackAggregate`` SI agrega (la mediana
-        de la ventana temporal, Task 11), sin ninguna transformacion.
+        de la ventana temporal, Task 11), sin ninguna transformacion. La
+        geometria de pixel del overlay en vivo (``contour_px`` y las otras
+        tres, encargo posterior al plan de 20 tareas) tampoco existe a este
+        nivel -- ``TrackAggregate`` es un resumen TEMPORAL sin mascara de
+        ningun cuadro en particular -- asi que queda vacia por el mismo
+        motivo que ``area_mm2``/``width_profile``.
         """
         return BananaMeasures(
             codex_length_mm=aggregate.length_mm,
@@ -192,6 +197,10 @@ class ValidationView(QWidget):
             area_mm2=float("nan"),
             volume_mm3=aggregate.volume_mm3,
             width_profile=(np.array([]), np.array([])),
+            contour_px=np.empty((0, 2)),
+            axis_path_px=np.empty((0, 2)),
+            axis_tips_px=(np.zeros(2), np.zeros(2)),
+            outer_curve_px=np.empty((0, 2)),
         )
 
     def record_sample(

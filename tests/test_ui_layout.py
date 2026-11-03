@@ -50,7 +50,7 @@ from PySide6.QtWidgets import QFrame, QLabel
 
 import threading
 
-from codex_caliper.aruco_tools import CalibrationState
+from codex_caliper.aruco_tools import CalibrationState, MarkerDetection
 from codex_caliper.camera import CameraThread
 from codex_caliper.codex import CodexVerdict
 from codex_caliper.homography import DegenerateMarkerLayout, PlaneCalibration
@@ -116,12 +116,20 @@ def _aggregate(*, track_id: int = 1, locked: bool = True, samples: int = 30) -> 
 def _banana_result(*, track_id: int = 1, locked: bool = True, passes: bool = True) -> BananaResult:
     mask = np.zeros((200, 300), dtype=bool)
     mask[50:150, 50:250] = True
+    # Esta tarea prueba layout de ventana/paneles, no la geometria del
+    # overlay (encargo posterior al plan de 20 tareas) -- sin curvas que
+    # dibujar aqui, los cuatro campos quedan vacios.
+    empty_path = np.empty((0, 2), dtype=np.float64)
     return BananaResult(
         track_id=track_id,
         aggregate=_aggregate(track_id=track_id, locked=locked),
         verdict=CodexVerdict(passes=passes, length_ok=passes, caliper_ok=passes, commercial_grade=38),
         estimated_weight_g=145.0,
         mask=mask,
+        contour_px=empty_path,
+        axis_path_px=empty_path,
+        axis_tips_px=(np.zeros(2), np.zeros(2)),
+        outer_curve_px=empty_path,
     )
 
 
@@ -132,6 +140,7 @@ def _frame_result(
     plane: PlaneCalibration | None = None,
     results: list[BananaResult] | None = None,
     warnings: list[str] | None = None,
+    markers: list | None = None,
 ) -> FrameResult:
     if raw is None:
         raw = _frame(640, 480, value=200)
@@ -141,6 +150,7 @@ def _frame_result(
         plane=plane,
         results=results or [],
         warnings=warnings or [],
+        markers=markers or [],
     )
 
 
@@ -679,6 +689,48 @@ def test_update_frame_result_draws_the_measurement_overlay_on_the_video(qtbot):
         for px in range(max(0, x), min(displayed.width(), x + 220))
     )
     assert region_differs, "el bloque de etiqueta de este banano no cambio ningun pixel -- el overlay no se aplico ahi"
+
+    window.close()
+
+
+def test_update_frame_result_draws_the_marker_overlay_on_the_rectified_video(qtbot):
+    """Encargo posterior al plan de 20 tareas: los marcadores ArUco tienen
+    que verse en la vista PRINCIPAL (el lienzo rectificado), no solo en
+    ``PlaneCalibrationView`` -- una pantalla de calibracion APARTE,
+    display-only, que vuelve a llamar a ``detect_markers`` por su cuenta.
+    Antes de este cambio ``FrameResult`` ni siquiera cargaba los
+    marcadores que el pipeline ya detecto (se descartaban al salir de
+    ``Pipeline.process``), asi que no habia forma de dibujarlos aqui sin
+    volver a correr deteccion en la interfaz -- exactamente lo que el
+    encargo pidio evitar.
+
+    Misma forma que ``test_update_frame_result_draws_the_measurement_overlay_on_the_video``
+    (Finding 1, ronda de revision 1): comparar el lienzo MOSTRADO contra
+    el lienzo CRUDO de entrada, en la region exacta de las esquinas del
+    marcador -- no contar pixeles en cualquier lado del cuadro, que una
+    implementacion que dibujara OTRA cosa en OTRO lado tambien pasaria.
+    """
+    window = MainWindow(intrinsics=_intrinsics())
+    qtbot.addWidget(window)
+
+    rectified = _frame(900, 600, value=235)
+    marker = MarkerDetection(
+        id=1,
+        corners=np.array([[40.0, 40.0], [100.0, 40.0], [100.0, 100.0], [40.0, 100.0]], dtype=np.float32),
+    )
+    window.update_frame_result(
+        _frame_result(rectified=rectified, plane=_plane(), results=[], markers=[marker])
+    )
+
+    displayed = window.video_view.main_pixmap.toImage()
+    bare = _bare_qpixmap(rectified).toImage()
+
+    region_differs = any(
+        displayed.pixelColor(px, py) != bare.pixelColor(px, py)
+        for py in range(30, 110)
+        for px in range(30, 110)
+    )
+    assert region_differs, "el marcador no se dibujo sobre el lienzo rectificado que se muestra"
 
     window.close()
 

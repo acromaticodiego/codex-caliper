@@ -378,6 +378,80 @@ def test_volume_requires_the_hemisphere_cap_correction():
     assert m.volume_mm3 == pytest.approx(gt.volume_mm3, rel=0.03)
 
 
+# ---------------------------------------------------------------------------
+# Geometria de pixel para el overlay en vivo (encargo posterior al plan de
+# 20 tareas): ``measure_mask`` ya calculaba ``contour``/``axis``/``outer``
+# internamente y los tiraba al retornar -- ahora viajan en el resultado
+# como ``contour_px``/``axis_path_px``/``axis_tips_px``/``outer_curve_px``.
+# ---------------------------------------------------------------------------
+
+
+def test_contour_and_axis_fields_are_exactly_what_measure_mask_computed_internally():
+    """``contour_px``/``axis_path_px``/``axis_tips_px`` tienen que ser EXACTAMENTE
+    la geometria que ``measure_mask`` ya calculo para medir -- no una version
+    recalculada con otros parametros, ni un placeholder.
+
+    Rechaza, por ejemplo, devolver el contorno de ``cv2.findContours`` con
+    ``CHAIN_APPROX_SIMPLE`` en vez de ``CHAIN_APPROX_NONE`` (que
+    ``_largest_contour_px`` SI usa): ambos son "un contorno valido" pero con
+    una cantidad de puntos distinta, y la comparacion de aqui es por
+    igualdad exacta de arreglo, no de longitud o de forma aproximada.
+    """
+    cfg = _cfg()
+    mask, _gt = make_banana(RADIUS_MM, ARC_RAD, WIDTH_MM, MM_PER_PX)
+
+    expected_contour = _largest_contour(mask)
+    expected_axis = medial_axis_path(mask)
+    assert expected_axis is not None
+
+    m = measure_mask(mask, MM_PER_PX, cfg)
+    assert m is not None
+
+    assert np.array_equal(m.contour_px, expected_contour)
+    assert np.array_equal(m.axis_path_px, expected_axis.path_px)
+    assert np.array_equal(m.axis_tips_px[0], expected_axis.tips_px[0])
+    assert np.array_equal(m.axis_tips_px[1], expected_axis.tips_px[1])
+
+
+@pytest.mark.parametrize("width_mm,pedicel_width_mm", FRUIT_GEOMETRIES)
+def test_outer_curve_px_is_the_pedicel_trimmed_curve_used_for_codex_length(width_mm, pedicel_width_mm):
+    """``outer_curve_px`` tiene que ser la curva YA RECORTADA al fruto -- la
+    misma que ``measure_mask`` usa para calcular ``codex_length_mm`` -- no
+    la curva exterior COMPLETA (``outer_curve(contour, axis.tips_px)``, que
+    todavia incluye el pedicelo).
+
+    Recomputar la longitud suavizada sobre ``outer_curve_px`` tiene que
+    reproducir ``codex_length_mm`` exactamente (es, literalmente, el mismo
+    calculo). Una implementacion que devolviera ``full_outer`` (la curva
+    SIN recortar) en ``outer_curve_px`` pasaria esa primera aserción igual
+    de bien SOLO SI tambien se usara ``full_outer`` para ``codex_length_mm``
+    -- lo que no es el caso: ``codex_length_mm`` ya esta fijado por los
+    tests de arriba sobre el tramo recortado. La segunda aserción es la que
+    de verdad distingue las dos curvas: recortada tiene que ser mas CORTA
+    que la version sin recortar, porque el pedicelo (que la sin-recortar
+    todavia incluye) se quito.
+    """
+    cfg = _cfg()
+    mask, _gt = make_banana(
+        RADIUS_MM, ARC_RAD, width_mm, MM_PER_PX,
+        pedicel_mm=PEDICEL_MM, pedicel_width_mm=pedicel_width_mm,
+    )
+
+    axis = medial_axis_path(mask)
+    assert axis is not None
+    contour = _largest_contour(mask)
+    full_outer = outer_curve(contour, axis.tips_px)
+
+    m = measure_mask(mask, MM_PER_PX, cfg)
+    assert m is not None
+
+    recomputed_trimmed_mm = smoothed_arc_length_mm(m.outer_curve_px, MM_PER_PX)
+    recomputed_full_mm = smoothed_arc_length_mm(full_outer, MM_PER_PX)
+
+    assert recomputed_trimmed_mm == pytest.approx(m.codex_length_mm, rel=1e-9)
+    assert recomputed_trimmed_mm < recomputed_full_mm
+
+
 @pytest.mark.parametrize("width_mm,pedicel_width_mm", FRUIT_GEOMETRIES)
 def test_trim_fires_across_fruit_sizes(width_mm, pedicel_width_mm):
     # Ronda de revision 1, finding 1: el criterio tenia que dispararse en

@@ -99,13 +99,28 @@ def _result(
     aggregate: TrackAggregate | None = None,
     verdict: CodexVerdict | None = None,
     weight_g: float | None = 124.0,
+    contour_px: np.ndarray | None = None,
+    axis_path_px: np.ndarray | None = None,
+    axis_tips_px: tuple[np.ndarray, np.ndarray] | None = None,
+    outer_curve_px: np.ndarray | None = None,
 ) -> BananaResult:
+    """``contour_px``/``axis_path_px``/``axis_tips_px``/``outer_curve_px``
+    (encargo posterior al plan de 20 tareas) tienen default ``None`` aqui y
+    se traducen a sentinelas VACIOS -- no al pipeline real: estos tests
+    construyen un resultado para probar el TEXTO del rotulo, no la
+    geometria del overlay, asi que la mayoria no les pasa nada. Los que si
+    les importa la geometria (ver mas abajo) los pasan explicitos."""
+    empty_path = np.empty((0, 2), dtype=np.float64)
     return BananaResult(
         track_id=track_id,
         aggregate=aggregate if aggregate is not None else _aggregate(track_id=track_id),
         verdict=verdict if verdict is not None else _verdict(),
         estimated_weight_g=weight_g,
         mask=mask,
+        contour_px=contour_px if contour_px is not None else empty_path,
+        axis_path_px=axis_path_px if axis_path_px is not None else empty_path,
+        axis_tips_px=axis_tips_px if axis_tips_px is not None else (np.zeros(2), np.zeros(2)),
+        outer_curve_px=outer_curve_px if outer_curve_px is not None else empty_path,
     )
 
 
@@ -435,6 +450,174 @@ def test_draw_results_keeps_the_label_visible_when_the_mask_touches_the_bottom_e
         "solo sobrevive un borron aislado de la primera linea cerca del borde; "
         "el resto del rotulo (CAL / L / peso) desaparecio"
     )
+
+
+# ---------------------------------------------------------------------------
+# Geometria del metodo (encargo posterior al plan de 20 tareas): contorno,
+# eje medial, cuerda y curva Codex. Las coordenadas de abajo son todas
+# HORIZONTALES/VERTICALES a proposito: ``_draw_geometry`` dibuja las tres
+# lineas de apoyo (contorno/eje/cuerda) con ``cv2.LINE_8`` -- sin
+# antialiasing -- precisamente para que un pixel sobre la linea tenga el
+# color EXACTO pedido, verificable sin tolerancia (ver docstring de
+# ``_draw_polyline`` en ``overlay.py``); una linea diagonal seguiria siendo
+# un color solido con ``LINE_8``, pero elegir horizontal/vertical hace que
+# la aritmetica de "que pixel cae sobre la linea" sea trivial de leer en
+# esta prueba.
+# ---------------------------------------------------------------------------
+
+_COLOR_CONTOUR = (130, 130, 130)
+_COLOR_AXIS_AND_CHORD = (150, 95, 60)
+_COLOR_CODEX_CURVE = (225, 155, 15)
+
+
+def test_contour_is_a_thin_border_not_a_filled_box():
+    """Ruling 1 del encargo original ("no hay bbox") aplicado a la geometria
+    nueva: ``contour_px`` tiene que trazarse como un borde FINO, no como una
+    caja rellena. Una implementacion que confundiera "dibujar el contorno"
+    con "pintar su interior" (p.ej. ``cv2.fillPoly`` en vez de
+    ``cv2.polylines``) pintaria el centro del rectangulo igual que el
+    borde; esta prueba lo rechaza comprobando AMBOS: borde pintado, centro
+    sin pintar.
+    """
+    canvas = np.zeros(_CANVAS_SHAPE, np.uint8)
+    rectangle = np.array([[50.0, 50.0], [250.0, 50.0], [250.0, 150.0], [50.0, 150.0]])
+    mask = _rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 250, 150)
+    result = _result(mask, contour_px=rectangle)
+
+    out = draw_results(canvas, [result], 0.2)
+
+    assert tuple(out[50, 150]) == _COLOR_CONTOUR, "el borde superior del contorno no se dibujo"
+    assert tuple(out[150, 50]) == _COLOR_CONTOUR, "el borde izquierdo del contorno no se dibujo"
+    assert tuple(out[100, 150]) == (0, 0, 0), "el interior del contorno quedo pintado -- es una caja, no un borde"
+
+
+def test_axis_follows_its_own_bent_path_and_the_chord_connects_the_tips_field_not_the_path_endpoints():
+    """Dos afirmaciones del encargo en una prueba, porque comparten el
+    mismo fixture:
+
+    1. El eje medial se dibuja siguiendo ``axis_path_px`` ENTERO (con su
+       curva real), no un segmento recto entre sus dos extremos -- aqui el
+       camino se dobla por (150, 60), que NO esta sobre la recta entre sus
+       dos puntas (50, 100)-(250, 100). Una implementacion que solo
+       conectara ``path_px[0]`` con ``path_px[-1]`` (perdiendo la curva)
+       nunca pintaria (150, 60).
+    2. La cuerda conecta ``axis_tips_px`` -- un campo propio, no derivado de
+       ``axis_path_px`` -- deliberadamente puesto en puntas DISTINTAS de
+       las del camino ((10, 150) y (290, 150), no (50, 100)/(250, 100)).
+       Esto es exactamente lo que pide la Ruling de pruebas del encargo
+       ("los extremos de la cuerda son las puntas del eje medial", el
+       CAMPO, no una lectura de las puntas del camino): si la
+       implementacion recalculara la cuerda desde ``path_px[0]``/``[-1]``
+       en vez de leer ``axis_tips_px``, la cuerda caeria en la fila 100,
+       no en la 150, y esta prueba lo atraparia.
+    """
+    canvas = np.zeros(_CANVAS_SHAPE, np.uint8)
+    bent_path = np.array([[50.0, 100.0], [150.0, 60.0], [250.0, 100.0]])
+    tips = (np.array([10.0, 150.0]), np.array([290.0, 150.0]))
+    mask = _rectangle_mask(_CANVAS_SHAPE[:2], 40, 40, 260, 160)
+    result = _result(mask, axis_path_px=bent_path, axis_tips_px=tips)
+
+    out = draw_results(canvas, [result], 0.2)
+
+    assert tuple(out[60, 150]) == _COLOR_AXIS_AND_CHORD, "el doblez real del eje medial no se dibujo"
+
+    # La cuerda es PUNTEADA (dash=14, gap=9 px, ver constantes de modulo):
+    # distancia 5 desde (10, 150) cae dentro del primer trazo, distancia 18
+    # cae dentro del primer hueco.
+    assert tuple(out[150, 15]) == _COLOR_AXIS_AND_CHORD, "no hay trazo donde el patron punteado exige uno"
+    assert tuple(out[150, 28]) == (0, 0, 0), "hay tinta en un hueco del patron punteado -- la cuerda salio SOLIDA"
+
+    # Ni el eje ni la cuerda deberian haber pintado donde caerian las
+    # puntas del CAMINO si, por error, la cuerda las hubiera usado en vez
+    # de ``axis_tips_px``.
+    assert tuple(out[100, 150]) == (0, 0, 0), "algo se dibujo en la fila de las puntas del camino, no de axis_tips_px"
+
+
+def test_codex_curve_is_drawn_on_top_of_the_contour_at_a_shared_pixel():
+    """Jerarquia visual (encargo: "la curva Codex es la protagonista, no
+    cuatro lineas de igual peso"): en un pixel donde el contorno y la
+    curva Codex se CRUZAN a proposito, el pixel final tiene que mostrar el
+    color de la curva Codex, no el del contorno -- la protagonista se
+    dibuja AL FINAL, encima de las lineas de apoyo. Si el orden de dibujo
+    se invirtiera (contorno despues de la curva), este pixel mostraria
+    ``_COLOR_CONTOUR`` en vez de ``_COLOR_CODEX_CURVE``.
+    """
+    canvas = np.zeros(_CANVAS_SHAPE, np.uint8)
+    rectangle = np.array([[50.0, 50.0], [250.0, 50.0], [250.0, 150.0], [50.0, 150.0]])
+    # Cruza el borde superior del rectangulo (y=50) en x=150.
+    crossing_curve = np.array([[150.0, 20.0], [150.0, 80.0]])
+    mask = _rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 250, 150)
+    result = _result(mask, contour_px=rectangle, outer_curve_px=crossing_curve)
+
+    out = draw_results(canvas, [result], 0.2)
+
+    assert tuple(out[50, 150]) == _COLOR_CODEX_CURVE, (
+        "en el pixel donde contorno y curva Codex se cruzan debe ganar la curva Codex (protagonista)"
+    )
+
+
+def test_each_result_draws_only_its_own_geometry_not_its_neighbors():
+    # Mismo espiritu que test_draw_results_paints_near_each_results_own_anchor_regardless_of_list_order
+    # (Ruling 4 del encargo original), aplicado a la geometria nueva en vez
+    # del texto: dos frutos, con geometria bien separada y EN ORDEN
+    # INVERTIDO a su posicion espacial, para que un bug que mezclara la
+    # geometria de un resultado con la del otro (p.ej. por indice de lista
+    # en vez de por el propio ``BananaResult``) no pueda esconderse detras
+    # de un orden casual.
+    wide_shape = (300, 900, 3)
+    canvas = np.zeros(wide_shape, np.uint8)
+
+    mask_left = _rectangle_mask(wide_shape[:2], 20, 50, 60, 150)
+    curve_left = np.array([[20.0, 200.0], [60.0, 200.0]])
+
+    mask_right = _rectangle_mask(wide_shape[:2], 600, 50, 640, 150)
+    curve_right = np.array([[600.0, 220.0], [640.0, 220.0]])
+
+    left_result = _result(mask_left, track_id=1, outer_curve_px=curve_left)
+    right_result = _result(mask_right, track_id=2, outer_curve_px=curve_right)
+
+    out = draw_results(canvas, [right_result, left_result], 0.2)
+    solo_left = draw_results(canvas, [left_result], 0.2)
+    solo_right = draw_results(canvas, [right_result], 0.2)
+
+    # Cada curva aparece en SU propia fila, y NO en la fila del otro fruto.
+    assert tuple(out[200, 40]) == _COLOR_CODEX_CURVE
+    assert tuple(out[220, 620]) == _COLOR_CODEX_CURVE
+    assert tuple(out[220, 40]) == (0, 0, 0), "la curva del fruto derecho se filtro a la fila del fruto izquierdo"
+    assert tuple(out[200, 620]) == (0, 0, 0), "la curva del fruto izquierdo se filtro a la fila del fruto derecho"
+
+    # Y el render conjunto coincide, pixel a pixel, con el render SOLO de
+    # cada fruto en su propia region -- ninguno de los dos quedo pintado
+    # con la curva ajena.
+    assert np.array_equal(out[180:240, 0:100], solo_left[180:240, 0:100])
+    assert np.array_equal(out[180:240, 580:680], solo_right[180:240, 580:680])
+
+
+def test_draw_results_does_not_mutate_the_geometry_arrays_either():
+    # La proteccion de "nunca mutar" del encargo original (Ruling del
+    # lienzo) se extiende a la geometria nueva: ni ``_draw_geometry`` ni
+    # ninguno de sus ayudantes puede modificar los arreglos que
+    # ``BananaResult`` trae, porque son los MISMOS arreglos que
+    # ``measure_mask`` calculo y que ``correct_measures``/el pipeline
+    # siguen sosteniendo para el resto del cuadro.
+    canvas = np.zeros(_CANVAS_SHAPE, np.uint8)
+    contour = np.array([[50.0, 50.0], [250.0, 50.0], [250.0, 150.0], [50.0, 150.0]])
+    axis_path = np.array([[50.0, 100.0], [150.0, 60.0], [250.0, 100.0]])
+    tips = (np.array([10.0, 150.0]), np.array([290.0, 150.0]))
+    outer_curve = np.array([[150.0, 20.0], [150.0, 80.0]])
+    contour_before, axis_before, outer_before = contour.copy(), axis_path.copy(), outer_curve.copy()
+    tips_before = (tips[0].copy(), tips[1].copy())
+
+    mask = _rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 250, 150)
+    result = _result(
+        mask, contour_px=contour, axis_path_px=axis_path, axis_tips_px=tips, outer_curve_px=outer_curve
+    )
+    draw_results(canvas, [result], 0.2)
+
+    assert np.array_equal(contour, contour_before)
+    assert np.array_equal(axis_path, axis_before)
+    assert np.array_equal(tips[0], tips_before[0]) and np.array_equal(tips[1], tips_before[1])
+    assert np.array_equal(outer_curve, outer_before)
 
 
 # ---------------------------------------------------------------------------

@@ -92,7 +92,7 @@ from codex_caliper.homography import DegenerateMarkerLayout
 from codex_caliper.intrinsics import Intrinsics, IntrinsicsMismatch
 from codex_caliper.pipeline import MARKER_COUNT, FrameResult, Pipeline
 from codex_caliper.ui.calibration_view import IntrinsicCalibrationView, PlaneCalibrationView
-from codex_caliper.ui.overlay import draw_results
+from codex_caliper.ui.overlay import draw_marker_overlay, draw_results
 from codex_caliper.ui.side_panel import SidePanel
 from codex_caliper.ui.theme import (
     BG_VOID_HEX,
@@ -586,6 +586,27 @@ class MainWindow(QMainWindow):
         camino de la escala es una invitacion a medir con una escala que
         nadie calibro.
 
+        ``draw_marker_overlay`` (Task 17) se aplica tambien AQUI, sobre el
+        MISMO lienzo rectificado -- encargo posterior al plan de 20 tareas.
+        Antes solo se dibujaba en ``PlaneCalibrationView`` (una pantalla
+        aparte, de solo calibracion, que la spec documenta como
+        display-only), asi que la vista principal -- la que spec S13 pone
+        PRIMERO entre lo que se publica -- nunca mostraba los marcadores que
+        sostienen la metrica. Se dibuja sobre el lienzo RECTIFICADO, no
+        sobre el PiP crudo, por una razon de CADENCIA, no de gusto:
+        ``result.markers`` llega a la cadencia del PIPELINE (esta misma
+        senal), pero el PiP se refresca aparte, a la cadencia de la CAMARA
+        (``set_raw_frame``, ver docstring de ``video_view.py``) -- dibujar
+        marcadores ahi los dejaria desincronizados del cuadro que
+        realmente los contiene, parpadeando entre un cuadro con marcadores
+        pintados y varios sin ellos hasta el siguiente resultado del
+        pipeline. El lienzo rectificado, en cambio, SOLO se actualiza
+        junto con ``result`` (misma llamada), asi que los marcadores que se
+        pintan son siempre los de ESE cuadro. Se dibuja ANTES de
+        ``draw_results``: los marcadores viven en las esquinas del lienzo y
+        la fruta en el centro, pero si algo cambia esa geometria el
+        protagonista de este video es la fruta, no el marcador.
+
         ``result.warnings`` se enruta a la linea de avisos (C2). Era el
         unico campo de ``FrameResult`` sin ningun consumidor en todo el
         proyecto, con cinco mensajes distintos de operador escritos ahi.
@@ -594,8 +615,10 @@ class MainWindow(QMainWindow):
         mm_per_px = result.plane.mm_per_px if result.plane is not None else None
 
         rectified = result.rectified
-        if rectified is not None and mm_per_px is not None:
-            rectified = draw_results(rectified, result.results, mm_per_px)
+        if rectified is not None:
+            rectified = draw_marker_overlay(rectified, result.markers)
+            if mm_per_px is not None:
+                rectified = draw_results(rectified, result.results, mm_per_px)
 
         self.video_view.set_rectified_frame(rectified)
         self.video_view.set_raw_frame(result.raw_undistorted)
