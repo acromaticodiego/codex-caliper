@@ -97,6 +97,24 @@ def test_is_acceptable_follows_the_half_pixel_threshold():
     assert _dummy_intrinsics(rms_px=0.80).is_acceptable is False
 
 
+def test_is_placeholder_fires_only_on_an_exact_zero_rms_not_on_any_good_calibration():
+    """Fix de la demo de LinkedIn. La implementacion equivocada que esta
+    prueba RECHAZA: reusar ``is_acceptable`` (``rms_px < INTRINSICS_MAX_RMS_PX``)
+    como señal de "placeholder" tambien -- esa condicion es VERDADERA para
+    0.0 (el placeholder real) pero TAMBIEN para 0.21 (una calibracion
+    genuinamente buena), asi que marcaria como placeholder una calibracion
+    real que no lo es. ``is_placeholder`` tiene que distinguir ambos casos:
+    dispara con 0.0 exacto y NO dispara con 0.21, aunque los dos sean
+    ``is_acceptable``.
+    """
+    assert _dummy_intrinsics(rms_px=0.0).is_placeholder is True
+    assert _dummy_intrinsics(rms_px=0.21).is_placeholder is False
+    assert _dummy_intrinsics(rms_px=0.21).is_acceptable is True, (
+        "0.21 tiene que seguir siendo is_acceptable -- la prueba de arriba solo "
+        "vale si ambos casos comparten ese True y is_placeholder los distingue igual"
+    )
+
+
 def test_roundtrip_preserves_matrix_and_zoom_note(tmp_path):
     intr = _dummy_intrinsics(zoom_note="zoom marcado con pintura en 4mm")
     intr.save(tmp_path / "intrinsics.json")

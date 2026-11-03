@@ -99,6 +99,32 @@ class Intrinsics:
         """True si el RMS de reproyeccion esta bajo el umbral de aceptacion."""
         return self.rms_px < INTRINSICS_MAX_RMS_PX
 
+    @property
+    def is_placeholder(self) -> bool:
+        """True si estos intrinsecos son el marcador de arranque sin calibrar
+        (``config/intrinsics.json`` los trae por defecto para que la app
+        pueda iniciar sin el tablero de ajedrez), no una calibracion real.
+
+        La señal es ``rms_px == 0.0`` exacto. No es un umbral mas estricto
+        que ``is_acceptable`` -- es una condicion DISTINTA: ``cv2.calibrateCamera``
+        minimiza un error de reproyeccion sobre docenas de esquinas detectadas
+        con ruido subpixel; que ese minimo caiga en exactamente 0.0 no ocurre
+        en una calibracion real, por buena que sea (0.21 px, 0.05 px, lo que
+        sea, pero no 0.0 px exacto). Por eso esta propiedad NO fija ningun
+        umbral nuevo ni depende de ``camera_matrix``/``dist_coeffs`` (que
+        ``_intrinsics`` de pruebas en otros modulos ya construye con
+        ``np.eye(3)`` y ``rms_px`` distinto de cero con toda naturalidad,
+        sin ser un placeholder) -- el 0.0 exacto es la unica huella que el
+        placeholder deja y que una calibracion real no puede producir.
+
+        Bug que esto corrige (demo de LinkedIn): ``is_acceptable`` sola no
+        distingue "0.0 px porque nunca se calibro" de "0.0 px porque la
+        calibracion fue perfecta" -- ambas pasan ``0.0 < INTRINSICS_MAX_RMS_PX``
+        igual, asi que el placeholder se mostraba en la barra de estado con
+        el mismo estilo sano que la MEJOR calibracion posible.
+        """
+        return self.rms_px == 0.0
+
     def require_compatible(self, current_size: tuple[int, int]) -> None:
         """Lanza ``IntrinsicsMismatch`` si ``current_size`` no coincide con la
         resolucion con la que se calibraron estos intrinsecos.

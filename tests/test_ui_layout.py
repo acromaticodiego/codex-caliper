@@ -1200,3 +1200,88 @@ def test_a_healthy_residual_just_below_the_threshold_does_not_warn(qtbot):
         _frame_result(rectified=_frame(900, 600), plane=_plane(residual_mm=RESIDUAL_WARN_MM))
     )
     assert window.status_is_warning() is True
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 (demo de LinkedIn) -- intrinsecos placeholder en la barra de estado.
+# ---------------------------------------------------------------------------
+
+
+def _placeholder_intrinsics() -> Intrinsics:
+    """Reproduce ``config/intrinsics.json`` tal cual lo dejo el autor para
+    poder arrancar la app sin el tablero de ajedrez: matriz identidad,
+    distorsion cero, RMS 0.0 EXACTO."""
+    return Intrinsics(
+        camera_matrix=np.eye(3),
+        dist_coeffs=np.zeros(5),
+        rms_px=0.0,
+        image_size=(1920, 1080),
+        zoom_note="PROVISIONAL - NOT a real calibration.",
+    )
+
+
+def test_status_bar_warns_about_placeholder_intrinsics_instead_of_showing_them_as_healthy(qtbot):
+    """Fix de la demo de LinkedIn: intrinsecos placeholder (RMS 0.0 exacto)
+    pasaban ``is_acceptable`` igual que la MEJOR calibracion real posible
+    (``0.0 < INTRINSICS_MAX_RMS_PX``), asi que la barra de estado mostraba
+    "Intrinsics RMS 0.00px" con el check VERDE -- el unico caso sin
+    calibracion real mostrandose como el mejor posible.
+
+    La implementacion equivocada que esta prueba RECHAZA: la anterior
+    (solo ``is_acceptable``), que da ``status_is_warning() is False`` para
+    el placeholder -- exactamente lo opuesto de lo que esta prueba exige.
+    No alcanza con que aparezca ALGUNA palabra de aviso: se fija que el
+    texto diga explicitamente que no es una calibracion real.
+    """
+    window = MainWindow(intrinsics=_placeholder_intrinsics())
+    qtbot.addWidget(window)
+    # Marcadores sanos (4/4), para aislar que el aviso viene de los
+    # intrinsecos y no del estado por defecto "calibration blocked"
+    # (``_plane is None``) con el que arranca cualquier ventana nueva.
+    window.update_frame_result(_frame_result(rectified=_frame(900, 600), plane=_plane()))
+
+    text = window.status_text()
+    assert window.status_is_warning() is True
+    assert "placeholder" in text.lower() or "not a real calibration" in text.lower(), text
+
+    window.close()
+
+
+def test_status_bar_does_not_warn_about_a_genuinely_good_calibration_with_a_low_rms(qtbot):
+    """La otra mitad: una calibracion real con RMS 0.21 px (buena, bajo el
+    umbral de 0.5) NO es un placeholder y tiene que seguir en el estilo
+    SANO. La implementacion equivocada que esta prueba RECHAZA: una que
+    marcara CUALQUIER RMS bajo (no solo 0.0 exacto) como placeholder --
+    esa version tambien dispararia aqui, con 0.21, y esta prueba la
+    atrapa.
+    """
+    good_intrinsics = _intrinsics(rms_px=0.21)
+    window = MainWindow(intrinsics=good_intrinsics)
+    qtbot.addWidget(window)
+    window.update_frame_result(_frame_result(rectified=_frame(900, 600), plane=_plane()))
+
+    text = window.status_text()
+    assert window.status_is_warning() is False
+    assert "0.21" in text
+    assert "placeholder" not in text.lower()
+
+    window.close()
+
+
+def test_measurement_stays_enabled_with_placeholder_intrinsics(qtbot):
+    """Decision explicita del encargo: el placeholder avisa, no bloquea.
+    Bloquear la medicion pararia la grabacion en vivo del demo por una
+    condicion que el sistema ya puede medir y etiquetar -- la respuesta
+    honesta es medir con la salvedad visible, no negarse a medir. La
+    implementacion equivocada que esta prueba RECHAZA: una que metiera
+    ``is_placeholder`` dentro de ``measurement_enabled`` (o de
+    ``blocked_reason``) -- esa version bloquearia la medicion justo
+    cuando el autor esta grabando con intrinsecos placeholder a proposito.
+    """
+    window = MainWindow(intrinsics=_placeholder_intrinsics())
+    qtbot.addWidget(window)
+
+    assert window.measurement_enabled is True
+    assert window.blocked_reason() == ""
+
+    window.close()

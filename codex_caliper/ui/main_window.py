@@ -811,8 +811,25 @@ class MainWindow(QMainWindow):
         return text, intrinsics_warning or markers_warning or residual_warning
 
     def _intrinsics_segment(self) -> tuple[str, bool]:
+        """Segmento de intrinsecos de la barra de estado.
+
+        Fix de la demo de LinkedIn: ``Intrinsics.is_placeholder`` se
+        consulta ANTES que ``is_acceptable`` -- los intrinsecos placeholder
+        de arranque (``config/intrinsics.json``, RMS 0.0 exacto, matriz
+        identidad) pasan ``is_acceptable`` igual que la mejor calibracion
+        real posible (``0.0 < INTRINSICS_MAX_RMS_PX``), asi que sin este
+        chequeo primero la barra mostraba "Intrinsics RMS 0.00px" en el
+        estilo SANO -- la unica calibracion que no existe mostrandose como
+        la mejor posible. Se usa ``_WARN`` (no ``_CROSS``): la medicion NO
+        se bloquea por esto (Ruling del encargo -- bloquearla pararia la
+        grabacion en vivo por una condicion que ya se puede medir y
+        etiquetar), asi que el estilo es el mismo "avisa pero no detiene"
+        que ``_markers_segment`` usa para DEGRADED.
+        """
         if self._intrinsics is None:
             return f"{_CROSS} Intrinsics: not loaded", True
+        if self._intrinsics.is_placeholder:
+            return f"{_WARN} Intrinsics: PLACEHOLDER, not a real calibration", True
         if not self._intrinsics.is_acceptable:
             return f"{_CROSS} Intrinsics RMS {self._intrinsics.rms_px:.2f}px", True
         return f"{_CHECK} Intrinsics RMS {self._intrinsics.rms_px:.2f}px", False
