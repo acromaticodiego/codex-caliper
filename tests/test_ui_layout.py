@@ -85,9 +85,21 @@ def _bare_qpixmap(frame: np.ndarray) -> QPixmap:
 
 
 def _plane(
-    *, state: CalibrationState = CalibrationState.OK, mm_per_px: float = 0.2, residual_mm: float = 0.18
+    *,
+    state: CalibrationState = CalibrationState.OK,
+    mm_per_px: float = 0.2,
+    residual_mm: float = 0.18,
+    H: np.ndarray | None = None,
 ) -> PlaneCalibration:
-    return PlaneCalibration(H=np.eye(3), residual_mm=residual_mm, state=state, mm_per_px=mm_per_px)
+    # ``H`` default es la identidad: la MAYORIA de las pruebas de este
+    # archivo prueban layout/paneles, no geometria de homografia, y una
+    # identidad deja el lienzo igual al cuadro de entrada para esas. La
+    # prueba del marcador (fix de la demo de LinkedIn, ver mas abajo) pasa
+    # una ``H`` real para poder discriminar "se transformo" de "no se
+    # transformo" -- con la identidad las dos son indistinguibles.
+    return PlaneCalibration(
+        H=H if H is not None else np.eye(3), residual_mm=residual_mm, state=state, mm_per_px=mm_per_px
+    )
 
 
 def _intrinsics(*, rms_px: float = 0.21, image_size: tuple[int, int] = (1920, 1080)) -> Intrinsics:
@@ -169,7 +181,17 @@ class RecordingPipeline:
     def process(self, frame: np.ndarray) -> FrameResult:
         self.threads.append(QThread.currentThread())
         self.frames.append(frame)
-        return _frame_result(rectified=frame, raw=frame)
+        # ``plane`` no puede ser ``None`` junto con un ``rectified`` real:
+        # el ``Pipeline`` de verdad nunca produce esa combinacion (BLOCKED
+        # es la UNICA razon para ``rectified is None``, y ahi ``plane``
+        # tambien es ``None`` -- ver docstring de ``FrameResult``).
+        # ``update_frame_result`` (Fix 1, demo de LinkedIn) ahora lee
+        # ``plane.H`` para proyectar los marcadores al espacio del
+        # lienzo; un sustituto que rompiera esa invariante (como la
+        # version anterior de este metodo, sin ``plane``) la haria
+        # explotar con un ``AttributeError`` sobre ``None`` -- fiel al
+        # contrato real, no un defecto de este sustituto.
+        return _frame_result(rectified=frame, raw=frame, plane=_plane())
 
 
 class BlockingPipeline:
@@ -281,42 +303,81 @@ def test_pip_toggles_with_the_keyboard_in_both_directions(qtbot):
     assert window.video_view.pip_visible is True
 
 
+def test_pip_width_is_a_fraction_of_the_widget_not_of_the_source_frame(qtbot):
+    """Fix 2 (pedido explicito del autor: "haz que la ventana donde se ve
+    el banano normal ocupe menos espacio"). La implementacion ANTERIOR
+    calculaba ``PIP_SCALE`` sobre el ANCHO NATIVO del cuadro crudo
+    (``frame.shape[1]``), no sobre el widget donde se pinta -- con una
+    camara de 1920 px pintada en un widget de 800 px eso fijaba el PiP en
+    ``round(1920 * 0.25) = 480`` px SIEMPRE, el 60% del widget, sin
+    importar cuanto se redimensionara la ventana (la queja real del
+    autor: en su pantalla el PiP ocupaba ~40% y tapaba el extremo del
+    tallo).
+
+    Se eligen un ancho de widget (800) y un ancho de cuadro crudo (1920)
+    deliberadamente DISTINTOS para que las dos bases de calculo diverjan:
+    la implementacion vieja da 480, la correcta da
+    ``round(800 * PIP_SCALE) = 200``. Afirmar solo "el PiP es chico" no
+    discrimina -- 480 TAMBIEN es chico frente a un widget de 800 px; lo
+    que discrimina es afirmar el numero EXACTO que cada base produce, y
+    rechazar el de la base equivocada.
+    """
+    view = VideoView()
+    qtbot.addWidget(view)
+    view.resize(800, 600)
+
+    raw = _frame(1920, 1080)
+    rectified = _frame(1900, 1000)
+    view.set_frame(rectified, raw)
+
+    wrong_frame_relative_width = round(raw.shape[1] * PIP_SCALE)  # 480 -- el bug
+    correct_widget_relative_width = round(view.width() * PIP_SCALE)  # 200 -- el fix
+    assert correct_widget_relative_width != wrong_frame_relative_width, "el fixture debe discriminar"
+    assert view.pip_pixmap.width() == correct_widget_relative_width
+    assert view.pip_pixmap.width() != wrong_frame_relative_width
+
+
 def test_pip_is_rendered_small_but_still_legible(qtbot):
     """Ruling 1: ``pip.width() < main.width() // 3`` por si solo lo satisface
     un PiP de un pixel. Se agrega un piso absoluto de legibilidad: el PiP
     tiene que ser chico Y seguir sirviendo como miniatura en un video real.
 
-    I11 (ronda de correcciones finales): esta prueba afirmaba ``>= 100``
-    contra un piso real de ``PIP_MIN_WIDTH_PX = 160``, asi que no podia
-    fallar por el valor que dice proteger -- cualquier piso entre 100 y 160
-    la deja verde. Peor: con los 640 px de entrada de este caso,
-    ``target_width = max(160, round(640 * 0.25)) = 160``, o sea que gana
-    ``PIP_SCALE`` y el piso NO es la restriccion activa: ningun valor del
-    piso por debajo de 160 cambia el resultado. Se afirma la constante real
-    Y se agrega el caso donde el piso de verdad manda (ver la prueba de
-    abajo).
+    Widget redimensionado EXPLICITAMENTE (Fix 2): el ancho del PiP ahora
+    depende de ``self.width()``, no del tamano por defecto (no mostrado)
+    de un ``QWidget`` -- fijar la ventana a un tamano realista de la
+    pantalla del README (1300x820) hace que esta prueba no dependa de un
+    default implicito de Qt que podria cambiar entre versiones/plataformas.
     """
     view = VideoView()
     qtbot.addWidget(view)
+    view.resize(1300, 820)
 
-    raw = _frame(640, 480)
-    rectified = _frame(900, 600)
+    raw = _frame(1920, 1080)
+    rectified = _frame(1900, 1000)
     view.set_frame(rectified, raw)
 
-    assert view.pip_pixmap.width() < view.main_pixmap.width() // 3
+    assert view.pip_pixmap.width() < view.width() // 3
     assert view.pip_pixmap.width() >= PIP_MIN_WIDTH_PX, (
         "el PiP no puede degenerar a algo ilegible en video"
     )
 
 
-def test_pip_floor_binds_on_a_narrow_raw_frame(qtbot):
-    """I11: el caso donde ``PIP_MIN_WIDTH_PX`` es la restriccion ACTIVA.
+def test_pip_floor_binds_on_a_narrow_widget(qtbot):
+    """I11 / Fix 2: el caso donde ``PIP_MIN_WIDTH_PX`` es la restriccion
+    ACTIVA -- ahora sobre el ancho del WIDGET, no del cuadro crudo (ver
+    test de arriba: esa es la base que cambio en este fix).
 
-    Con un cuadro crudo de 320 px, ``round(320 * PIP_SCALE) = 80`` esta por
+    Con un widget de 500 px, ``round(500 * PIP_SCALE) = 125`` esta por
     DEBAJO del piso, asi que el piso es lo que decide el ancho. Rebajar
     ``PIP_MIN_WIDTH_PX`` (a 80, a 1) cambia el resultado de esta prueba y la
-    pone roja -- cosa que la prueba de arriba, con su cuadro de 640 px, no
-    puede hacer ni con el piso en cero.
+    pone roja -- cosa que la prueba de arriba, con su widget de 800/1300 px,
+    no puede hacer ni con el piso en cero.
+
+    El cuadro crudo sigue siendo GRANDE (1920 px) a proposito: si el piso
+    todavia se calculara (por error) sobre el ancho del cuadro en vez del
+    widget, ``round(1920 * PIP_SCALE) = 480`` NO caeria bajo el piso, y
+    esta prueba fallaria -- es la misma discriminacion de la primera
+    prueba de esta seccion, aplicada al piso en vez de a la fraccion.
 
     Se exige ademas que el piso no AGRANDE la miniatura por encima del
     cuadro crudo (``_downscale_for_pip`` devuelve el cuadro tal cual en ese
@@ -324,11 +385,12 @@ def test_pip_floor_binds_on_a_narrow_raw_frame(qtbot):
     """
     view = VideoView()
     qtbot.addWidget(view)
+    view.resize(500, 350)
 
-    raw = _frame(320, 240)
-    view.set_frame(_frame(900, 600), raw)
+    raw = _frame(1920, 1080)
+    view.set_frame(_frame(1900, 1000), raw)
 
-    assert round(320 * PIP_SCALE) < PIP_MIN_WIDTH_PX, "el fixture debe caer bajo el piso"
+    assert round(view.width() * PIP_SCALE) < PIP_MIN_WIDTH_PX, "el fixture debe caer bajo el piso"
     assert view.pip_pixmap.width() == PIP_MIN_WIDTH_PX
     assert view.pip_pixmap.width() <= raw.shape[1], "el piso no puede agrandar la miniatura"
 
@@ -693,22 +755,35 @@ def test_update_frame_result_draws_the_measurement_overlay_on_the_video(qtbot):
     window.close()
 
 
-def test_update_frame_result_draws_the_marker_overlay_on_the_rectified_video(qtbot):
-    """Encargo posterior al plan de 20 tareas: los marcadores ArUco tienen
-    que verse en la vista PRINCIPAL (el lienzo rectificado), no solo en
-    ``PlaneCalibrationView`` -- una pantalla de calibracion APARTE,
-    display-only, que vuelve a llamar a ``detect_markers`` por su cuenta.
-    Antes de este cambio ``FrameResult`` ni siquiera cargaba los
-    marcadores que el pipeline ya detecto (se descartaban al salir de
-    ``Pipeline.process``), asi que no habia forma de dibujarlos aqui sin
-    volver a correr deteccion en la interfaz -- exactamente lo que el
-    encargo pidio evitar.
+def test_update_frame_result_draws_the_marker_overlay_in_the_rectified_canvas_space(qtbot):
+    """Fix 1 (demo de LinkedIn, EL bug real de esta ronda): ``result.markers``
+    trae las esquinas de deteccion en pixeles de la imagen CRUDA sin
+    distorsion (``detect_markers`` corre sobre ``raw_undistorted``, ver
+    docstring de ``FrameResult``), no en pixeles del lienzo RECTIFICADO
+    que esta prueba pinta -- dos espacios de pixeles DISTINTOS,
+    relacionados por ``plane.H`` (``PlaneCalibration.H``: "mapea pixeles de
+    imagen a pixeles del lienzo rectificado", ver su docstring).
 
-    Misma forma que ``test_update_frame_result_draws_the_measurement_overlay_on_the_video``
-    (Finding 1, ronda de revision 1): comparar el lienzo MOSTRADO contra
-    el lienzo CRUDO de entrada, en la region exacta de las esquinas del
-    marcador -- no contar pixeles en cualquier lado del cuadro, que una
-    implementacion que dibujara OTRA cosa en OTRO lado tambien pasaria.
+    La version de esta prueba en la ronda anterior usaba ``_plane()`` con
+    su ``H`` por defecto (identidad): con una identidad, dibujar las
+    esquinas SIN transformar es PIXEL POR PIXEL indistinguible de
+    transformarlas -- exactamente el tipo de prueba que el encargo nombra
+    como de las trece que pasaban igual con una implementacion correcta y
+    con una incorrecta. Visible en la grabacion real de la demo: un solo
+    cuadrilatero verde flotando sobre el lomo del banano (un marcador
+    pintado en su coordenada de imagen cruda, que cae ahi por pura
+    coincidencia geometrica), mientras los 4 marcadores reales -- en las
+    esquinas del lienzo -- no tenian ningun contorno encima.
+
+    Aqui ``H`` es una TRASLACION real (``(+260, +200)``, sin rotacion para
+    que la aritmetica de regiones sea trivial de leer), asi que una
+    implementacion correcta y una incorrecta (sin transformar) DIFIEREN en
+    donde pintan, y la prueba lo comprueba en AMBAS regiones -- no solo
+    que "algo se dibujo en la region correcta" (eso solo, una
+    implementacion que dibujara en los DOS sitios seguiria pasandolo): el
+    marcador tiene que aparecer en sus esquinas YA TRANSFORMADAS
+    (300..360, 240..300) Y NO en sus esquinas CRUDAS (30..110, 30..110),
+    que es exactamente donde lo deja el bug.
     """
     window = MainWindow(intrinsics=_intrinsics())
     qtbot.addWidget(window)
@@ -718,19 +793,28 @@ def test_update_frame_result_draws_the_marker_overlay_on_the_rectified_video(qtb
         id=1,
         corners=np.array([[40.0, 40.0], [100.0, 40.0], [100.0, 100.0], [40.0, 100.0]], dtype=np.float32),
     )
+    translation_H = np.array([[1.0, 0.0, 260.0], [0.0, 1.0, 200.0], [0.0, 0.0, 1.0]])
     window.update_frame_result(
-        _frame_result(rectified=rectified, plane=_plane(), results=[], markers=[marker])
+        _frame_result(rectified=rectified, plane=_plane(H=translation_H), results=[], markers=[marker])
     )
 
     displayed = window.video_view.main_pixmap.toImage()
     bare = _bare_qpixmap(rectified).toImage()
 
-    region_differs = any(
-        displayed.pixelColor(px, py) != bare.pixelColor(px, py)
-        for py in range(30, 110)
-        for px in range(30, 110)
+    def _region_differs(x0: int, y0: int, x1: int, y1: int) -> bool:
+        return any(
+            displayed.pixelColor(px, py) != bare.pixelColor(px, py)
+            for py in range(y0, y1)
+            for px in range(x0, x1)
+        )
+
+    assert _region_differs(300, 240, 360, 300), (
+        "el marcador no se dibujo en su posicion TRANSFORMADA (image_px -> canvas_px via H)"
     )
-    assert region_differs, "el marcador no se dibujo sobre el lienzo rectificado que se muestra"
+    assert not _region_differs(30, 30, 110, 110), (
+        "el marcador se dibujo en sus esquinas CRUDAS (sin transformar) -- el bug real: "
+        "pintar coordenadas de imagen cruda directo sobre un lienzo que es otro espacio"
+    )
 
     window.close()
 

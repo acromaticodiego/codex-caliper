@@ -88,7 +88,7 @@ from PySide6.QtWidgets import (
 from codex_caliper.aruco_tools import CalibrationState
 from codex_caliper.camera import CameraThread
 from codex_caliper.config import AppConfig
-from codex_caliper.homography import DegenerateMarkerLayout
+from codex_caliper.homography import DegenerateMarkerLayout, project_marker_corners
 from codex_caliper.intrinsics import Intrinsics, IntrinsicsMismatch
 from codex_caliper.pipeline import MARKER_COUNT, FrameResult, Pipeline
 from codex_caliper.ui.calibration_view import IntrinsicCalibrationView, PlaneCalibrationView
@@ -607,6 +607,42 @@ class MainWindow(QMainWindow):
         la fruta en el centro, pero si algo cambia esa geometria el
         protagonista de este video es la fruta, no el marcador.
 
+        Fix de la demo de LinkedIn: las esquinas se PROYECTAN al espacio
+        del lienzo antes de dibujarlas
+        ----------------------------------------------------------------
+        ``result.markers`` las calculo ``detect_markers`` sobre
+        ``raw_undistorted`` (ver docstring de ``FrameResult``): sus
+        ``corners`` viven en pixeles de la imagen cruda sin distorsion, no
+        en pixeles del lienzo rectificado -- son dos espacios DISTINTOS, y
+        ``rectified`` es el resultado de aplicarle ``plane.H``
+        (``warpPerspective``) a esa misma imagen cruda. Dibujar
+        ``result.markers`` tal cual sobre ``rectified`` (la version
+        anterior a este fix) dejaba el contorno en la coordenada de imagen
+        cruda de cada marcador, que cae en el lienzo por pura coincidencia
+        geometrica -- en la grabacion de la demo, un solo cuadrilatero
+        verde flotando sobre el LOMO del banano, sin relacion con ningun
+        marcador real, mientras los 4 marcadores de verdad (visibles en las
+        esquinas del lienzo) quedaban sin ningun contorno encima.
+        ``project_marker_corners`` (``homography.py``) aplica la MISMA
+        ``H`` -- punto a punto, con ``cv2.perspectiveTransform``, la
+        primitiva que ``compute_plane_calibration`` ya usa para medir
+        ``residual_mm`` -- a las 4 esquinas de cada deteccion, para que el
+        contorno quede en el lienzo rectificado, en el marcador real.
+
+        No se dibuja TAMBIEN sobre el PiP crudo (``set_raw_frame``):
+        ``result.raw_undistorted`` SI esta en el espacio nativo de
+        ``result.markers`` (cero transformacion de por medio, asi que ahi
+        no hay ningun bug de coordenadas que corregir), pero el PiP ya se
+        refresca a la cadencia de la CAMARA, no de ESTE resultado (parrafo
+        de arriba); pintar los marcadores encima de
+        ``result.raw_undistorted`` justo aqui los haria aparecer un
+        instante y desaparecer en el siguiente cuadro de camara (que no
+        los trae), parpadeando -- exactamente el defecto de desincronizacion
+        que el parrafo de arriba ya documenta como la razon de NO pintar en
+        el PiP. El lienzo rectificado, mas grande y protagonista del video
+        (spec S8), es donde el metodo ArUco queda genuinamente visible sin
+        pagar ese parpadeo.
+
         ``result.warnings`` se enruta a la linea de avisos (C2). Era el
         unico campo de ``FrameResult`` sin ningun consumidor en todo el
         proyecto, con cinco mensajes distintos de operador escritos ahi.
@@ -616,7 +652,8 @@ class MainWindow(QMainWindow):
 
         rectified = result.rectified
         if rectified is not None:
-            rectified = draw_marker_overlay(rectified, result.markers)
+            canvas_markers = project_marker_corners(result.markers, result.plane.H)
+            rectified = draw_marker_overlay(rectified, canvas_markers)
             if mm_per_px is not None:
                 rectified = draw_results(rectified, result.results, mm_per_px)
 

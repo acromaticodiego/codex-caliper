@@ -221,3 +221,43 @@ def rectify(frame: np.ndarray, plane: PlaneCalibration, canvas_size_px: tuple[in
     homografia correcta vive en ``compute_plane_calibration``.
     """
     return cv2.warpPerspective(frame, plane.H, canvas_size_px)
+
+
+def project_marker_corners(detections: list[MarkerDetection], H: np.ndarray) -> list[MarkerDetection]:
+    """Proyecta las esquinas de cada deteccion al espacio del lienzo rectificado.
+
+    Fix de la demo de LinkedIn (round de fixes posterior a la visualizacion
+    en vivo, commit 818e9e8): ``detect_markers`` corre sobre
+    ``raw_undistorted`` (ver ``Pipeline.process``), asi que
+    ``detection.corners`` vive en pixeles de la imagen cruda sin distorsion
+    -- un espacio de pixeles DISTINTO del lienzo rectificado. ``rectify``
+    ya usa ``plane.H`` para llevar la IMAGEN entera a ese otro espacio
+    (``warpPerspective``, ver docstring de ``PlaneCalibration``: "``H``
+    mapea pixeles de imagen a pixeles del lienzo rectificado"); esta
+    funcion aplica la MISMA ``H`` punto a punto (``perspectiveTransform``,
+    la misma primitiva que ``compute_plane_calibration`` ya usa para medir
+    ``residual_mm``) a las esquinas de los marcadores, para que quien
+    dibuje encima del lienzo rectificado lo haga en SU espacio, no en el
+    de la imagen cruda.
+
+    Sin esto, dibujar ``detections`` directamente sobre ``rectified``
+    (como hacia ``MainWindow.update_frame_result`` antes de este fix) deja
+    el contorno de un marcador en su coordenada de imagen cruda, que solo
+    por coincidencia cae dentro del lienzo rectificado -- tipicamente en un
+    punto sin relacion con donde esta ese marcador en el lienzo, mientras
+    los marcadores reales (en las esquinas del lienzo) quedan sin ningun
+    contorno encima.
+
+    Devuelve detecciones NUEVAS: no muta ``detections`` ni sus arreglos de
+    esquinas, que el resto del cuadro (p.ej. ``draw_marker_overlay`` sobre
+    el PiP crudo, si algun caller lo hiciera) sigue necesitando en su
+    espacio ORIGINAL.
+    """
+    if not detections:
+        return []
+    corners_px = np.asarray([d.corners for d in detections], dtype=np.float64)
+    projected = cv2.perspectiveTransform(corners_px.reshape(-1, 1, 2), H).reshape(len(detections), 4, 2)
+    return [
+        MarkerDetection(id=detection.id, corners=projected[i].astype(np.float32))
+        for i, detection in enumerate(detections)
+    ]

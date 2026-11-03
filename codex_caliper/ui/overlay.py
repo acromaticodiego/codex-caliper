@@ -258,10 +258,34 @@ def text_anchor_for(mask: np.ndarray) -> tuple[int, int]:
     nunca de un punto fijo del lienzo que no tenga relacion con donde
     esta el banano. El mismo recorte, sin volteo, se aplica en Y contra
     el borde inferior (no hay "arriba" y "abajo" del banano que tenga
-    sentido voltear ahi; subir el bloque es suficiente). Si ni el volteo
-    alcanza (lienzo mas angosto que el bloque -- no esperado en el rig
-    real, solo en fixtures de prueba sinteticos) se recorta a
-    ``[0, canvas_w - block_w]`` como ultimo recurso.
+    sentido voltear ahi; subir el bloque es suficiente).
+
+    Cuando NI el volteo alcanza (fix de la demo de LinkedIn)
+    ---------------------------------------------------------
+    El volteo a la izquierda (``x_min - margen - bloque``) puede salir
+    NEGATIVO sin que el lienzo sea mas angosto que el bloque: basta con
+    que la MASCARA sea ancha -- un banano que cruza casi todo el ancho del
+    lienzo, exactamente la postura que spec S13 vende en la demo, con
+    ``x_min`` chico y ``x_max`` grande a la vez. La version anterior, en
+    ese caso, SOBREESCRIBIA ``x`` con ese volteo negativo y dejaba que el
+    clamp final de abajo lo aplastara a ``0`` -- el borde ABSOLUTO del
+    lienzo, sin ninguna relacion con ``x_min`` real de la mascara (que
+    podia estar a cientos de pixeles de ese borde). Visible en la
+    grabacion de la demo: el rotulo "#1 / #### 30/30" flotando en la
+    esquina superior izquierda, sobre tarjeta blanca vacia, lejos del
+    banano.
+
+    El fix: si el volteo a la izquierda tambien es negativo, ``x`` se deja
+    en su valor SIN voltear (el intento original a la derecha de
+    ``x_max``) en vez de adoptar el volteo roto -- el clamp final lo
+    recorta entonces contra ``canvas_w - block_w``, que lo deja pegado al
+    borde del lienzo mas CERCA de ``x_max`` (el lado derecho de la propia
+    mascara), typicamente superpuesto a la parte derecha del banano en vez
+    de flotando en una esquina sin relacion con el. Solo en el caso
+    patologico de verdad -- el lienzo entero mas angosto que el bloque,
+    "no esperado en el rig real, solo en fixtures de prueba sinteticos" --
+    ese clamp final sigue cayendo en ``[0, canvas_w - block_w]`` como
+    ultimo recurso genuino.
 
     Al moverse la mascara el ancla se traslada con ella exactamente lo
     mismo, salvo que el recorte de borde intervenga -- es la propiedad
@@ -283,7 +307,14 @@ def text_anchor_for(mask: np.ndarray) -> tuple[int, int]:
 
     x = x_max + _LABEL_MARGIN_PX
     if x + _LABEL_BLOCK_WIDTH_PX > canvas_w:
-        x = x_min - _LABEL_MARGIN_PX - _LABEL_BLOCK_WIDTH_PX
+        flipped_x = x_min - _LABEL_MARGIN_PX - _LABEL_BLOCK_WIDTH_PX
+        if flipped_x >= 0:
+            x = flipped_x
+        # Si ``flipped_x`` tambien es negativo, ``x`` se queda en el
+        # intento original (lado derecho, sin voltear) -- ver docstring
+        # mas arriba (fix de la demo de LinkedIn): el clamp de abajo lo
+        # deja pegado al borde del lienzo mas cerca de ``x_max``, no al
+        # volteo roto.
     x = max(0, min(x, max(0, canvas_w - _LABEL_BLOCK_WIDTH_PX)))
 
     block_h = _LABEL_MAX_LINES * _LINE_HEIGHT_PX
@@ -318,35 +349,72 @@ def compose_label_lines(result: BananaResult, mm_per_px: float) -> list[str]:
     fiable. Aqui se prueba la composicion sin pasar por pixeles, y
     ``draw_results`` solo coloca estas cadenas.
 
-    Mientras el agregado NO esta ``locked`` (Task 11: ventana sin llenar o
-    todavia ruidosa) se muestra unicamente el id y la barra de progreso --
-    nunca L/CAL/peso. Mostrar esos numeros mientras la ventana sigue
-    inestable seria exactamente el tipo de cifra plausible-pero-cambiante
-    que el proyecto ya evito en otros cinco sitios (ver
-    ``aggregation.py``): el veredicto Codex depende de dos umbrales y
-    podria alternar pass/fail frame a frame con la interfaz mostrando
-    numeros como si fueran definitivos. Una vez ``locked`` ocurre lo
-    opuesto: la barra de progreso desaparece (ya no esta "progresando",
-    esta fija) y aparecen el veredicto, L, calibre y peso, en ese orden --
-    el orden del mockup de la spec.
+    Decision revertida (fix de la demo de LinkedIn): ya NO se oculta L/CAL
+    mientras el agregado no esta ``locked``
+    -----------------------------------------------------------------------
+    La version original de esta funcion (ver commit de Task 17) ocultaba
+    L/CAL/peso por completo mientras ``locked`` era ``False``, mostrando
+    solo el id y la barra de progreso -- el razonamiento de entonces era
+    evitar un veredicto pass/fail que cambia de cuadro a cuadro con la
+    interfaz mostrandolo como definitivo. Esa razon sigue siendo VALIDA
+    para el VEREDICTO (sigue oculto mientras no este ``locked``, mas
+    abajo), pero resulto demasiado ancha: en una demo real, con el calibre
+    estable en sigma 0.33 mm pero la longitud con sigma 5.16 mm (contra un
+    umbral de ``lock`` de 1.0 mm en AMBOS -- umbral correcto, no se toca,
+    ver ``aggregation.py``), el agregado nunca llega a ``locked`` con la
+    ventana llena (30/30) y el panel se queda mostrando una barra de
+    progreso llena para siempre, sin un solo numero -- exactamente el
+    anti-objetivo de spec S4 ("ocultar limitaciones"), solo que disfrazado
+    de prudencia.
+
+    ``format_measurement`` ya existe PRECISAMENTE para mostrar una cifra
+    honesta bajo incertidumbre (su ``±``, y su piso a la escala del
+    lienzo): no hace falta "cifra definitiva" para mostrar "257 ± 5 mm",
+    que es verdad desde el primer cuadro y se hace mas angosto a medida
+    que la ventana se asienta. Por eso L/CAL se muestran SIEMPRE -- el
+    espectador ve la medida asentarse en vivo, que es mejor material de
+    demo que una barra sin numeros Y mas honesto (spec S4 corre en ambas
+    direcciones: ni falsa precision, ni ocultar lo que si se sabe).
+
+    Lo que SIGUE oculto mientras no esta ``locked``:
+
+    - El VEREDICTO ("OK"/"FAIL"): a diferencia de L/CAL, se imprime sin
+      incertidumbre -- es una comparacion contra dos umbrales, no una
+      magnitud con un ``±`` que lo salve de parecer definitivo. En su
+      lugar el encabezado mantiene el id y la barra de progreso (que
+      ``locked`` SI apaga, mas abajo -- la unica senal de "ya no esta
+      progresando, esta fija").
+    - El PESO: igual que el veredicto, se imprime como un entero sin
+      ninguna incertidumbre mostrada (``round(estimated_weight_g)``); sin
+      un ``±`` que lo acompane, mostrarlo antes de ``locked`` seria
+      precision falsa de la misma forma que el veredicto, no la honestidad
+      que S4 pide. Se mantiene con la regla ORIGINAL (solo si ``locked`` y
+      no ``None``).
+
+    ``_label_color`` (abajo) sigue distinguiendo ``locked`` de no-``locked``
+    por color (gris "midiendo" vs. verde/rojo de veredicto) -- el lock
+    sigue siendo informacion real, solo que ya no es la condicion para
+    mostrar ningun numero.
     """
     aggregate = result.aggregate
-    if not aggregate.locked:
+    if aggregate.locked:
+        verdict_word = "OK" if result.verdict.passes else "FAIL"
+        header = f"#{result.track_id} {verdict_word}"
+        lines = [header]
+    else:
         # I7: el denominador es ``aggregate.window`` (la ventana REAL con la
         # que este agregado se armo, Task 11/I7), no la constante de modulo
-        # ``TEMPORAL_WINDOW`` -- ver docstring de ``_progress_bar``.
-        return [
-            f"#{result.track_id}",
-            f"{_progress_bar(aggregate.samples, aggregate.window)} {aggregate.samples}/{aggregate.window}",
-        ]
+        # ``TEMPORAL_WINDOW`` -- ver docstring de ``_progress_bar``. La
+        # barra de progreso sigue siendo la UNICA senal de "todavia no esta
+        # fijo" ahora que L/CAL ya no se ocultan (ver docstring de arriba).
+        header = f"#{result.track_id}"
+        progress = f"{_progress_bar(aggregate.samples, aggregate.window)} {aggregate.samples}/{aggregate.window}"
+        lines = [header, progress]
 
-    verdict_word = "OK" if result.verdict.passes else "FAIL"
-    lines = [
-        f"#{result.track_id} {verdict_word}",
-        f"L {format_measurement(aggregate.length_mm, aggregate.length_std_mm, mm_per_px)}",
-        f"CAL {format_measurement(aggregate.caliper_mm, aggregate.caliper_std_mm, mm_per_px)}",
-    ]
-    if result.estimated_weight_g is not None:
+    lines.append(f"L {format_measurement(aggregate.length_mm, aggregate.length_std_mm, mm_per_px)}")
+    lines.append(f"CAL {format_measurement(aggregate.caliper_mm, aggregate.caliper_std_mm, mm_per_px)}")
+
+    if aggregate.locked and result.estimated_weight_g is not None:
         lines.append(f"{round(result.estimated_weight_g)} g")
     return lines
 

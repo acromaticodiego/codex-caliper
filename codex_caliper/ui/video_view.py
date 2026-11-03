@@ -3,16 +3,29 @@ cuadro crudo como PiP en una esquina (Task 18, spec S8 variante 1).
 
 Dos decisiones de la encargante gobiernan este modulo:
 
-1. **El PiP se renderiza a resolucion reducida.** El pipeline ya paga un
-   ``warpPerspective`` por cuadro para producir ``rectified`` (Task 14); el
-   PiP muestra el cuadro CRUDO (``raw_undistorted``), que no necesita ningun
-   warp adicional, pero convertirlo a ``QPixmap`` a resolucion completa en
-   cada repintado si costaria memoria y ancho de banda de composicion que
-   nadie necesita para una miniatura de esquina. Por eso se reescala con
-   ``cv2.resize`` ANTES de construir el ``QPixmap``, a una fraccion fija del
-   ancho nativo del cuadro crudo (``PIP_SCALE``), con un piso en pixeles
-   (``PIP_MIN_WIDTH_PX``) para que la miniatura no degenere a algo
-   ilegible en una toma de video real.
+1. **El PiP se renderiza a resolucion reducida, como fraccion del WIDGET,
+   no del cuadro crudo (fix de la demo de LinkedIn).** El pipeline ya paga
+   un ``warpPerspective`` por cuadro para producir ``rectified`` (Task 14);
+   el PiP muestra el cuadro CRUDO (``raw_undistorted``), que no necesita
+   ningun warp adicional, pero convertirlo a ``QPixmap`` a resolucion
+   completa en cada repintado si costaria memoria y ancho de banda de
+   composicion que nadie necesita para una miniatura de esquina. Por eso se
+   reescala con ``cv2.resize`` ANTES de construir el ``QPixmap``, a una
+   fraccion fija (``PIP_SCALE``) del ancho del WIDGET donde se pinta --
+   NO del ancho nativo del cuadro crudo, que es lo que hacia la version
+   anterior a este fix (``_downscale_for_pip`` tomaba ``scale * frame.shape[1]``).
+   Con una camara de 1920 px de ancho nativo pintada en un widget de
+   ~1300 px, ese bug fijaba el PiP en ``round(1920 * 0.25) = 480`` px
+   SIEMPRE -- el 37% del widget, no el 25% que ``PIP_SCALE`` dice, y
+   empeora mientras mas angosta este la ventana (la fraccion del widget
+   que ocupa el PiP SUBE si el widget se achica, porque el numerador no se
+   mueve con el). ``_pip_target_width_px`` calcula el ancho objetivo desde
+   ``self.width()`` -- el ancho REAL del widget en el momento en que llega
+   el cuadro -- para que el PiP responda al tamano de LA VENTANA, que es
+   donde vive, y no al de la camara, que es un numero que el operador ni
+   siquiera ve. Sigue con un piso en pixeles (``PIP_MIN_WIDTH_PX``) para
+   que la miniatura no degenere a algo ilegible en una toma de video real
+   cuando la ventana se achica mucho.
 
 2. **``rectified`` puede ser ``None``.** ``FrameResult.rectified`` (Task 14)
    es deliberadamente ``None`` -- no un lienzo en negro -- cuando la
@@ -55,12 +68,13 @@ from PySide6.QtWidgets import QWidget
 from codex_caliper.ui.imaging import bgr_to_qpixmap
 from codex_caliper.ui.theme import BG_VOID_HEX
 
-#: Fraccion del ancho nativo del cuadro crudo que ocupa el PiP.
+#: Fraccion del ancho del WIDGET (no del cuadro crudo, ver docstring del
+#: modulo -- fix de la demo de LinkedIn) que ocupa el PiP.
 PIP_SCALE = 0.25
 
 #: Piso en pixeles del PiP: por debajo de esto una miniatura de esquina deja
 #: de ser legible en una toma de video real, sin importar cuanto reduzca
-#: ``PIP_SCALE`` el ancho nativo.
+#: ``PIP_SCALE`` el ancho del widget.
 PIP_MIN_WIDTH_PX = 160
 
 #: Margen, en pixeles de widget, entre el PiP y el borde de la vista.
@@ -76,19 +90,35 @@ _BANNER_ORIGIN = (16, 36)
 _BANNER_COLOR_BGR = (60, 170, 217)  # ambar/acero, coherente con el aviso de la barra de estado
 
 
-def _downscale_for_pip(frame: np.ndarray, *, scale: float = PIP_SCALE, min_width_px: int = PIP_MIN_WIDTH_PX) -> np.ndarray:
-    """Reescala ``frame`` para el PiP, antes de convertirlo a ``QPixmap``.
+def _pip_target_width_px(
+    widget_width_px: int, *, scale: float = PIP_SCALE, min_width_px: int = PIP_MIN_WIDTH_PX
+) -> int:
+    """Ancho objetivo del PiP, en pixeles de WIDGET.
 
-    Si el cuadro de entrada ya es mas chico que el piso (tipico solo en
-    pruebas con cuadros sinteticos pequenos), se devuelve tal cual: no
-    tiene sentido AGRANDAR una miniatura.
+    Fraccion (``scale``) del ancho del CONTENEDOR donde se pinta -- nunca
+    del cuadro crudo (fix de la demo de LinkedIn, ver docstring del
+    modulo) -- con un piso absoluto de legibilidad (``min_width_px``).
+    """
+    return max(min_width_px, round(widget_width_px * scale))
+
+
+def _downscale_for_pip(frame: np.ndarray, target_width_px: int) -> np.ndarray:
+    """Reescala ``frame`` al ancho ``target_width_px``, antes de convertirlo a ``QPixmap``.
+
+    ``target_width_px`` ya viene decidido por el caller (``_pip_target_width_px``,
+    a partir del ancho del WIDGET) -- esta funcion solo ejecuta el
+    ``cv2.resize``, sin volver a decidir la fraccion.
+
+    Si el cuadro de entrada ya es mas chico que el objetivo (tipico en
+    pruebas con cuadros sinteticos pequenos, o una camara de baja
+    resolucion), se devuelve tal cual: no tiene sentido AGRANDAR una
+    miniatura mas alla de los pixeles que la camara entrego de verdad.
     """
     height, width = frame.shape[:2]
-    target_width = max(min_width_px, round(width * scale))
-    if target_width >= width:
+    if target_width_px >= width:
         return frame
-    target_height = max(1, round(height * target_width / width))
-    return cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
+    target_height = max(1, round(height * target_width_px / width))
+    return cv2.resize(frame, (target_width_px, target_height), interpolation=cv2.INTER_AREA)
 
 
 def _draw_fallback_banner(frame: np.ndarray, text: str) -> np.ndarray:
@@ -185,7 +215,17 @@ class VideoView(QWidget):
 
     def _store_raw(self, raw_frame: np.ndarray) -> None:
         self._raw_frame = raw_frame
-        self.pip_pixmap = bgr_to_qpixmap(_downscale_for_pip(raw_frame))
+        # El ancho objetivo se deriva de ``self.width()`` -- el ancho REAL
+        # del widget en este instante -- no del cuadro crudo (fix de la
+        # demo de LinkedIn, ver docstring del modulo). Si la ventana se
+        # redimensiona sin que llegue un cuadro nuevo, el PiP se queda en
+        # el tamano viejo hasta el siguiente cuadro de camara -- a la
+        # cadencia de la camara (~33 ms, ver docstring del modulo), un
+        # retraso imperceptible en video, y el mismo tipo de compromiso que
+        # ya acepta esta clase (``pip_pixmap`` se arma una vez por cuadro,
+        # no una vez por repintado).
+        target_width_px = _pip_target_width_px(self.width())
+        self.pip_pixmap = bgr_to_qpixmap(_downscale_for_pip(raw_frame, target_width_px))
 
     def _refresh_main_pixmap(self) -> None:
         """Recompone el area principal: el lienzo si existe, el crudo con su

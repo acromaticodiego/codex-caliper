@@ -247,6 +247,46 @@ def test_anchor_stays_within_canvas_bounds_near_the_bottom_edge():
     assert 0 <= ay < canvas_shape[0]
 
 
+# Espejan las constantes privadas de ``overlay.py`` (mismo patron que
+# ``_COLOR_CONTOUR`` etc. mas abajo en este archivo): redefinidas aqui en
+# vez de importadas, para no acoplar la prueba a un simbolo privado.
+_LABEL_MARGIN_PX = 10
+_LABEL_BLOCK_WIDTH_PX = 220
+
+
+def test_anchor_sticks_to_the_masks_right_edge_when_the_mask_spans_nearly_the_full_canvas():
+    """Fix 3 (demo de LinkedIn): con una mascara que cubre casi todo el
+    ancho del lienzo, NI el lado derecho (``x_max + margen + bloque`` se
+    sale del lienzo) NI el volteo a la izquierda (``x_min - margen -
+    bloque`` es NEGATIVO) caben enteros dentro de ``canvas_w``.
+
+    La implementacion ANTERIOR, en ese caso, adoptaba el volteo negativo y
+    dejaba que el clamp final lo aplastara a ``0`` -- el borde ABSOLUTO
+    del lienzo, sin ninguna relacion con ``x_min`` real (``50`` en este
+    fixture, lejos de ``0``). Es exactamente lo que se vio en la grabacion
+    de la demo: el rotulo flotando en la esquina superior izquierda, sobre
+    tarjeta blanca vacia, lejos del banano -- porque el banano de esa
+    toma cruzaba casi todo el ancho del cuadro.
+
+    Con el fix, cuando el volteo tambien falla, el intento ORIGINAL (lado
+    derecho de ``x_max``) sobrevive y el clamp final lo pega al borde del
+    lienzo mas CERCA de ``x_max`` -- en este fixture, exactamente
+    ``canvas_w - block_w = 1500 - 220 = 1280``, pegado al extremo derecho
+    de la propia mascara (``x_max = 1449``), no al origen del lienzo.
+
+    La implementacion vieja que esta prueba RECHAZA: cualquiera que
+    devuelva ``ax == 0`` (o cualquier valor cercano a 0) para este
+    fixture en vez de ``1280``.
+    """
+    canvas_shape = (300, 1500)
+    mask = _rectangle_mask(canvas_shape, 50, 120, 1450, 180)
+    ax, ay = text_anchor_for(mask)
+
+    expected_ax = canvas_shape[1] - _LABEL_BLOCK_WIDTH_PX  # 1280
+    assert ax == expected_ax, f"el ancla colapso a {ax} en vez de pegarse al borde derecho de la mascara"
+    assert ax != 0, "el ancla cayo en el borde absoluto del lienzo -- el bug viejo exacto"
+
+
 # ---------------------------------------------------------------------------
 # compose_label_lines -- Ruling 3: funcion pura, probada sobre cadenas.
 # ---------------------------------------------------------------------------
@@ -287,18 +327,62 @@ def test_unlocked_results_are_drawn_with_a_progress_indicator():
     assert any("19/30" in line for line in lines)
 
 
-def test_unlocked_result_label_omits_measurement_lines():
-    # mientras no esta "locked" la ventana sigue ruidosa (Task 11); mostrar
-    # L/CAL/peso en ese momento seria exactamente el tipo de numero
-    # plausible-pero-inestable que el proyecto evita en otros cinco sitios.
+def test_unlocked_result_label_shows_the_measurement_with_its_uncertainty():
+    """Decision REVERTIDA (fix de la demo de LinkedIn): ocultar L/CAL por
+    completo mientras ``locked`` es ``False`` (el comportamiento que esta
+    prueba fijaba antes) resulto demasiado ancho. Medido en vivo: calibre
+    estable en sigma 0.33 mm pero longitud en sigma 5.16 mm, contra un
+    umbral de ``lock`` de 1.0 mm en AMBOS (correcto, no se afloja) -- ese
+    agregado NUNCA llega a ``locked`` con la ventana llena, y el panel se
+    quedaba mostrando una barra de progreso llena para siempre sin un solo
+    numero. ``format_measurement`` ya reporta una cifra honesta con su
+    ``±``; no hace falta esperar a ``locked`` para mostrarla.
+
+    La implementacion que esta prueba RECHAZA es la ANTERIOR: cualquier
+    version que siga devolviendo solo ``["#id", "barra progreso"]``
+    mientras ``locked`` es ``False`` -- sin lineas ``L``/``CAL`` en
+    absoluto -- falla aqui, aunque pasara la prueba vieja de este mismo
+    archivo (la que esta prueba reemplaza).
+    """
     unlocked = _result(
         _rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150),
-        aggregate=_aggregate(samples=19, locked=False),
+        aggregate=_aggregate(
+            samples=30,
+            locked=False,
+            length_mm=257.4,
+            length_std_mm=5.16,
+            caliper_mm=38.4,
+            caliper_std_mm=0.33,
+        ),
     )
     lines = compose_label_lines(unlocked, mm_per_px=0.2)
-    assert not any(line.startswith("L ") for line in lines)
-    assert not any(line.startswith("CAL ") for line in lines)
-    assert not any(line.endswith(" g") for line in lines)
+    assert "L 257 ± 5 mm" in lines, lines
+    assert "CAL 38.4 ± 0.3 mm" in lines, lines
+
+
+def test_unlocked_result_label_still_omits_the_verdict_and_the_weight():
+    """La otra mitad de la decision revertida: lo que SI sigue oculto
+    mientras no esta ``locked`` es lo que se imprime SIN incertidumbre --
+    el veredicto ("OK"/"FAIL", una comparacion contra dos umbrales, no una
+    magnitud con ``±``) y el peso (un entero sin ningun ``±`` mostrado).
+    Mostrar esos dos antes de ``locked`` seria la misma falsa precision
+    que el proyecto evita en L/CAL con el piso de incertidumbre -- solo
+    que sin ningun ``±`` que lo salve de parecer definitivo. Una
+    implementacion que mostrara el veredicto o el peso aqui (p.ej. porque
+    dejo de distinguir ``locked`` en algun lado) falla esta prueba.
+    """
+    unlocked = _result(
+        _rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150),
+        aggregate=_aggregate(samples=30, locked=False, length_std_mm=5.16, caliper_std_mm=0.33),
+        weight_g=145.0,
+    )
+    lines = compose_label_lines(unlocked, mm_per_px=0.2)
+    assert not any(line.endswith(" OK") or line.endswith(" FAIL") for line in lines), lines
+    assert not any(line.endswith(" g") for line in lines), lines
+    # El encabezado se queda con el id a secas (mas la barra de progreso en
+    # su propia linea) -- la UNICA senal visible de "todavia midiendo".
+    assert lines[0] == f"#{unlocked.track_id}"
+    assert any("30/30" in line for line in lines), lines
 
 
 def test_locked_result_label_has_no_progress_indicator():
