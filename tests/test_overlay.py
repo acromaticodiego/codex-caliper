@@ -787,3 +787,83 @@ def test_draw_marker_overlay_colors_red_with_fewer_than_three_markers():
     assert _has_pixel_of_color(out, _COLOR_RED_BLOCKED)
     assert not _has_pixel_of_color(out, _COLOR_GREEN_OK)
     assert not _has_pixel_of_color(out, _COLOR_ORANGE_DEGRADED)
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 (demo de LinkedIn): el relleno del rotulo "midiendo" (``locked``
+# ``False``) tiene que sostener contraste real sobre una tarjeta blanca --
+# no basta con "algo de color", el halo negro de ``_draw_outlined_text``
+# protege el BORDE del glifo pero el interior del trazo sigue siendo el
+# color de relleno a secas. El valor viejo, (210, 210, 210), es casi
+# indistinguible de blanco; se fija aqui el valor nuevo real, no solo "es
+# mas oscuro que antes".
+# ---------------------------------------------------------------------------
+
+_COLOR_MEASURING_FILL = (90, 90, 90)
+_COLOR_LOCKED_PASS = (60, 200, 60)
+_COLOR_LOCKED_FAIL = (40, 40, 230)
+
+#: Piso de conteo, no "al menos un pixel" (ver docstring de la prueba de
+#: abajo: con el relleno VIEJO, (210, 210, 210), el halo negro
+#: anti-aliased sobre blanco deja por pura coincidencia aritmetica
+#: exactamente 1 pixel en (90, 90, 90) -- medido al escribir esta prueba.
+#: El relleno nuevo, en el mismo render, deja 229. El piso de 20 separa
+#: con margen amplio "es el relleno real" de "una coincidencia de
+#: anti-aliasing en el borde del halo".
+_MEASURING_FILL_PIXEL_FLOOR = 20
+
+
+def _count_pixels_of_color(image: np.ndarray, color: tuple[int, int, int]) -> int:
+    return int(np.sum(np.all(image == np.array(color, dtype=image.dtype), axis=-1)))
+
+
+def test_unlocked_label_fill_has_real_contrast_on_a_white_card():
+    """La implementacion equivocada que esta prueba RECHAZA: el
+    ``_COLOR_MEASURING`` ANTERIOR, (210, 210, 210) -- casi blanco sobre
+    blanco, exactamente el defecto que la captura de pantalla del demo
+    mostro.
+
+    Se cuenta, no solo se comprueba presencia: con el relleno viejo el
+    render de este mismo fixture deja exactamente 1 pixel en (90, 90, 90)
+    -- una coincidencia aritmetica del halo negro anti-aliased sobre el
+    lienzo blanco, SIN relacion con ``_COLOR_MEASURING`` -- mientras que
+    con el relleno nuevo deja 229. Una aserción de "algun pixel" (``any``)
+    la pasaria igual con el valor viejo por esa UNICA coincidencia; el
+    piso (``_MEASURING_FILL_PIXEL_FLOOR``, bien por debajo de 229 y bien
+    por encima de 1) es lo que de verdad discrimina. Se dibuja sobre un
+    lienzo BLANCO (255, 255, 255), no negro, porque el defecto es
+    especificamente "gris claro sobre tarjeta clara" -- un lienzo negro no
+    lo habria mostrado nunca.
+    """
+    white_card = np.full(_CANVAS_SHAPE, 255, np.uint8)
+    unlocked = _result(
+        _rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150),
+        aggregate=_aggregate(locked=False, samples=19),
+    )
+
+    out = draw_results(white_card, [unlocked], 0.2)
+
+    count = _count_pixels_of_color(out, _COLOR_MEASURING_FILL)
+    assert count >= _MEASURING_FILL_PIXEL_FLOOR, (
+        f"solo {count} pixeles del relleno oscuro nuevo -- "
+        "demasiado pocos para ser el relleno real del rotulo, no una coincidencia de borde"
+    )
+
+
+def test_locked_label_colors_are_unchanged_by_the_unlocked_fill_fix():
+    """Red de seguridad: el fix de contraste de arriba toca SOLO el
+    relleno de ``locked is False``. Una implementacion que, al oscurecer
+    ese color, hubiera tocado por error ``_COLOR_PASS``/``_COLOR_FAIL``
+    (p.ej. compartiendo una sola constante para los tres estados) se
+    atrapa aqui: el veredicto OK sigue en verde y FAIL sigue en rojo,
+    exactamente como antes del fix.
+    """
+    white_card = np.full(_CANVAS_SHAPE, 255, np.uint8)
+    passing = _result(_rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150), verdict=_verdict(passes=True))
+    failing = _result(_rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150), verdict=_verdict(passes=False))
+
+    out_pass = draw_results(white_card, [passing], 0.2)
+    out_fail = draw_results(white_card, [failing], 0.2)
+
+    assert _has_pixel_of_color(out_pass, _COLOR_LOCKED_PASS)
+    assert _has_pixel_of_color(out_fail, _COLOR_LOCKED_FAIL)

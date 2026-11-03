@@ -113,7 +113,19 @@ _OUTLINE_THICKNESS = 3
 #: unico canal.
 _COLOR_PASS = (60, 200, 60)
 _COLOR_FAIL = (40, 40, 230)
-_COLOR_MEASURING = (210, 210, 210)
+#: Gris oscuro, no gris casi-blanco (fix de la demo de LinkedIn): el valor
+#: anterior, (210, 210, 210), es casi indistinguible de la tarjeta blanca
+#: sobre la que se grabo el demo real -- el halo negro de
+#: ``_draw_outlined_text`` protege el BORDE del glifo, pero el interior del
+#: trazo seguia siendo ese mismo gris casi-blanco sobre blanco. (90, 90, 90)
+#: sostiene un contraste real contra blanco (igual que cualquier texto
+#: "midiendo" sobre la tarjeta) sin tomar ningun tono de ``_COLOR_PASS``/
+#: ``_COLOR_FAIL`` -- sigue siendo gris puro (R=G=B), asi que no compite
+#: con el verde/rojo del veredicto. El color no es lo unico que distingue
+#: "midiendo" de "fijo": el contenido ya lo hace (la barra de progreso y la
+#: ausencia de OK/FAIL), este cambio solo corrige que el refuerzo de color
+#: sea LEGIBLE, no que sea el unico canal.
+_COLOR_MEASURING = (90, 90, 90)
 
 _MARKER_COLORS = {
     CalibrationState.OK: (60, 200, 60),
