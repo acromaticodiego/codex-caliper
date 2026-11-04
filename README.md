@@ -11,16 +11,20 @@ The standard defines two parameters for export-grade bananas:
 | Grade (caliper) | ≥ 27 mm | diameter of the cross-section, at the reference finger |
 
 **That first definition is the whole project.** A bounding box cannot measure a curve.
-Measured on one real banana in this rig (details in *Accuracy*, below):
+Measured live on one real banana, through the complete chain — rectified canvas, pedicel
+trim, parallax correction, median over a 30-frame window:
 
 | Measurement | Value |
 |---|---|
-| Tip-to-tip chord — what a bounding box gives you | 182.3 mm |
-| Inner (concave) curve | 217.0 mm |
-| **Outer curve — the Codex length** | **233.5 mm** |
+| Straight chord between the two ends — what a box gives you | 191.2 ± 0.3 mm |
+| **Outer curve between the same two ends — the Codex length** | **257.2 ± 5.3 mm** |
 
-The standard's definition reads **51 mm longer than the chord — 28 % more**. A detector
-that reports a box is not slightly imprecise here; it is wrong by nearly a third.
+The standard's definition reads **66 mm longer than the straight line — about 35 % more**.
+A detector that reports a box is not slightly imprecise here; it is wrong by a third.
+
+Both numbers span the *same two endpoints*, so the gap between them is curvature and
+nothing else. The app draws both on the video — the arc solid, the chord dashed — so what
+the viewer sees is the method, not just a figure.
 
 ## Architecture: neural detection, classical measurement
 
@@ -54,8 +58,38 @@ frame. The one thing it cannot self-correct is a moved zoom or focus ring — se
 limits*.
 
 With 3 of 4 markers visible the fit still has 12 correspondences for 8 unknowns, so the
-system keeps measuring and says so (`⚠ 3/4 markers`). Below 3, measurement is **blocked**:
-no measurement is ever reported without a valid calibration.
+system keeps measuring and says so (`⚠ 3/4 markers`). Measured on this rig with a correct
+layout, dropping any one marker moves the residual from 1.03 mm to 1.05 mm — the degradation
+really is graceful. Below 3, measurement is **blocked**: no measurement is ever reported
+without a valid calibration.
+
+### How the markers are glued is read from the image, not assumed
+
+`cv2.aruco` returns a marker's four corners starting from the top-left of its **printed
+pattern** — a property of the code, not of where it lands in the frame. A marker glued on
+rotated 180° therefore hands you, first, the corner that is physically bottom-right.
+
+Assuming every marker is mounted square (the obvious thing to do, and what this project did
+for a long time) pairs each image corner with the wrong world corner, off by up to the
+marker's diagonal: **33.9 mm** for a 24 mm marker. The failure is quiet, which is what makes
+it expensive. A square's centroid does not move when you rotate it, so with all four markers
+visible the homography still puts the marker *centres* roughly where they belong and the
+canvas looks almost right; only the residual betrays it — and it reads *lower* when a marker
+drops out, because three markers fit their own 12 points more closely than four fit sixteen.
+
+So the mounting rotation is derived per marker from the angle of its own first edge
+(`homography.mounting_quarter_turns`), rounded to the nearest quarter turn. The assumption
+that replaces it is explicit and much weaker: the camera is roughly level over the plane
+(roll under 45°). On this rig the four measured angles land within 6° of a multiple of 90°,
+so the rounding is nowhere near ambiguous.
+
+Measured on this rig, in order:
+
+| Correspondences | Plane residual |
+|---|---|
+| assuming every marker is mounted square | 32.05 mm |
+| mounting rotation read from the image | 2.32 mm |
+| + `marker_layout` derived from the frame | **1.03 mm** |
 
 ## Install
 
@@ -223,6 +257,30 @@ config:
 quantity OpenCV calls `markerLength`. The reprojection residual the app shows is, among
 other things, a direct measure of how well you measured this layout.
 
+**You do not have to measure `marker_layout` by hand.** Derive it from one frame instead:
+
+```bash
+.venv/Scripts/python.exe -m tools.derive_layout --camera 1          # report only
+.venv/Scripts/python.exe -m tools.derive_layout --camera 1 --write  # save it
+```
+
+It solves the image→millimetre homography by requiring that *all four* markers come back as
+squares of the known `marker_length_mm`, then reads each centre off that solution. Re-run it
+every time a marker moves; it takes a second and it refuses to write a layout that fits the
+frame worse than the one already in the config.
+
+Two things it does **not** do, deliberately. It does not derive the layout from a single
+reference marker — measured on this rig, extrapolating one 24 mm square across the card
+returns the other markers' sides as 11–22 mm instead of 24, and the layout changes by over
+100 mm depending on which marker you pick; a small square does not observe the perspective
+term at that distance. And it does not scale pixel distances by a single `mm/px`: on this
+rig the same 24 mm marker spans 112.9–122.2 px depending on where it falls in the frame, an
+8 % spread, so one global scale places the far markers closer than they are.
+
+Its `square-condition RMS` is the number to watch. On this rig it sits at ~0.8 mm, and that
+floor is the uncorrected lens distortion: the model is a pure homography, which cannot
+absorb barrel distortion, so the RMS will not drop below it until step 9 is done.
+
 **9 — Calibrate the intrinsics.** Capture ≈ 20 photos of a chessboard in varied poses —
 tilted, near, far, in all four corners of the frame; a set of near-identical frontal views
 is ill-conditioned and will not converge. Save them somewhere, then:
@@ -293,13 +351,16 @@ What *has* been measured on this rig:
 
 Two notes on how to read those numbers.
 
-The **absolute** lengths at the top of this README (182.3 / 217.0 / 233.5 mm) were measured
-before the full correction chain existed — no distortion correction, no homography, no
-parallax correction, using the scale derived straight from the markers, which sit at radius
-~598 px from the optical centre while the banana sits at 0–300 px. Different parts of the
-lens. The **relative** comparisons (chord vs arc, raw vs smoothed) are solid, because both
-terms were measured the same way on the same image; the absolute values are provisional.
-That gap is itself the empirical argument for why step 9 is not optional.
+The lengths at the top of this README now come through the full chain (homography,
+rectified canvas, pedicel trim, parallax, 30-frame median) with a plane residual of ~1.0 mm,
+so they are no longer the provisional pre-chain figures earlier versions of this file
+carried. They are still **not** distortion-corrected — step 9 has not been run on this rig —
+so treat the absolute values as good to a few millimetres, not to the ±1 mm target. The
+**relative** comparison (chord vs arc) is solid regardless: both terms are measured the same
+way, on the same frame, between the same two endpoints.
+
+For reference, the measured Codex length of 257.1–257.5 mm agrees with the author's
+hand-measured 257.3 mm on the same fruit.
 
 **There is no single end-to-end accuracy figure here yet, on purpose.** The synthetic
 end-to-end test measures +0.32 % on length, and that number is *not* the system's accuracy:
