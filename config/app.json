@@ -1,0 +1,35 @@
+{
+  "marker_length_mm": 24.0,
+  "marker_thickness_mm": 2.4,
+  "working_distance_mm": 270.0,
+  "canvas_mm_per_px": 0.2,
+  "temporal_window": 30,
+  "pedicel_drop_ratio": 0.45,
+  "border_margin_px": 2,
+  "aruco_dictionary": "DICT_6X6_50",
+  "marker_ids": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "marker_layout": {
+    "1": [
+      200.53942738815886,
+      122.50040700338513
+    ],
+    "2": [
+      2.867458702999784,
+      125.07331098277137
+    ],
+    "3": [
+      0.0,
+      6.717625471040719
+    ],
+    "4": [
+      199.13574743986055,
+      0.0
+    ]
+  },
+  "every_n_frames": 1
+}
