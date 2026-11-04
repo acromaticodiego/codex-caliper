@@ -78,6 +78,11 @@ class TrackAggregate:
     length_std_mm: float
     caliper_mm: float
     caliper_std_mm: float
+    #: Mediana de la cuerda punta a punta sobre la ventana. Se agrega como
+    #: las demas y no se toma del ultimo cuadro: la interfaz publica el
+    #: cociente cuerda/arco, y un numerador sin agregar lo haria saltar
+    #: cuadro a cuadro con el fruto quieto.
+    chord_mm: float
     volume_mm3: float
     window: int
 
@@ -121,12 +126,14 @@ class MeasurementAggregator:
         lengths = np.array([m.codex_length_mm for m in buffer], dtype=float)
         calipers = np.array([m.caliper_mm for m in buffer], dtype=float)
         volumes = np.array([m.volume_mm3 for m in buffer], dtype=float)
+        chords = np.array([m.chord_mm for m in buffer], dtype=float)
 
         length_mm = float(np.median(lengths))
         length_std_mm = float(np.std(lengths))
         caliper_mm = float(np.median(calipers))
         caliper_std_mm = float(np.std(calipers))
         volume_mm3 = float(np.median(volumes))
+        chord_mm = float(np.median(chords))
 
         samples = len(buffer)
         window_full = samples == self.window
@@ -144,6 +151,7 @@ class MeasurementAggregator:
             length_std_mm=length_std_mm,
             caliper_mm=caliper_mm,
             caliper_std_mm=caliper_std_mm,
+            chord_mm=chord_mm,
             volume_mm3=volume_mm3,
             window=self.window,
         )

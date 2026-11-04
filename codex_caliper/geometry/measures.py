@@ -330,6 +330,14 @@ class BananaMeasures:
 
     codex_length_mm: float
     caliper_mm: float
+    #: Distancia RECTA entre los dos extremos de ``outer_curve_px``, en
+    #: milimetros: la que daria una caja contenedora o una regla apoyada de
+    #: punta a punta. Comparte extremos con ``codex_length_mm`` a proposito
+    #: -- medirla entre las puntas del EJE MEDIAL incluiria el pedicelo en
+    #: un lado y no en el otro, y la diferencia arco-cuerda dejaria de
+    #: aislar la curvatura, que es lo unico que esa diferencia debe
+    #: significar.
+    chord_mm: float
     area_mm2: float
     volume_mm3: float
     width_profile: tuple[np.ndarray, np.ndarray]
@@ -660,6 +668,7 @@ def measure_mask(mask: np.ndarray, mm_per_px: float, cfg: AppConfig) -> BananaMe
         return None
     outer = _restrict_outer_to_fruit(full_outer, axis, start, end, len(w_mm))
     codex_length_mm = smoothed_arc_length_mm(outer, mm_per_px)
+    chord_mm = float(np.linalg.norm(outer[-1] - outer[0])) * mm_per_px
 
     mid = (start + end) // 2
     caliper_mm = 2.0 * float(axis.radius_px[mid]) * mm_per_px
@@ -676,6 +685,7 @@ def measure_mask(mask: np.ndarray, mm_per_px: float, cfg: AppConfig) -> BananaMe
     return BananaMeasures(
         codex_length_mm=codex_length_mm,
         caliper_mm=caliper_mm,
+        chord_mm=chord_mm,
         area_mm2=area_mm2,
         volume_mm3=volume_mm3,
         width_profile=(s_mm, w_mm),

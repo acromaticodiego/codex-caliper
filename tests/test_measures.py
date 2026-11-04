@@ -594,3 +594,75 @@ def test_a_programming_error_propagates_instead_of_returning_none(monkeypatch):
     mask, _gt = make_banana(RADIUS_MM, ARC_RAD, WIDTH_MM, MM_PER_PX)
     with pytest.raises(AttributeError):
         measures_module.measure_mask(mask, MM_PER_PX, cfg)
+
+
+@pytest.mark.parametrize("width_mm,pedicel_width_mm", FRUIT_GEOMETRIES)
+def test_chord_spans_the_same_endpoints_as_the_codex_arc(width_mm, pedicel_width_mm):
+    """La cuerda tiene que ir de punta a punta de la curva Codex RECORTADA,
+    no de punta a punta del eje medial.
+
+    Es la unica forma de que "cuerda contra arco" aisle la CURVATURA: con
+    extremos distintos, la diferencia mezcla curvatura con el pedicelo que
+    una incluye y la otra no, y el ratio deja de significar lo que la
+    interfaz dira que significa.
+
+    Rechaza la implementacion que mide la cuerda entre ``axis.tips_px`` (las
+    puntas del eje medial, pedicelo incluido), que es lo que el overlay
+    dibujaba antes de este cambio.
+    """
+    cfg = _cfg()
+    mask, _gt = make_banana(
+        RADIUS_MM, ARC_RAD, width_mm, MM_PER_PX,
+        pedicel_mm=PEDICEL_MM, pedicel_width_mm=pedicel_width_mm,
+    )
+
+    m = measure_mask(mask, MM_PER_PX, cfg)
+    assert m is not None
+
+    expected = float(np.linalg.norm(m.outer_curve_px[-1] - m.outer_curve_px[0])) * MM_PER_PX
+    assert m.chord_mm == pytest.approx(expected, rel=1e-9)
+
+    axis = medial_axis_path(mask)
+    assert axis is not None
+    axis_chord = float(np.linalg.norm(axis.tips_px[1] - axis.tips_px[0])) * MM_PER_PX
+    assert m.chord_mm != pytest.approx(axis_chord, rel=1e-3), (
+        "la cuerda no puede coincidir con la del eje medial: el pedicelo las separa"
+    )
+
+
+def test_the_chord_to_arc_gap_grows_with_curvature():
+    """Entre dos frutos del MISMO largo de arco, el mas curvo tiene que
+    separar mas la cuerda del arco: esa separacion ES la curvatura, y es el
+    porcentaje que la interfaz publica como argumento del proyecto.
+
+    Rechaza ``chord_mm = codex_length_mm`` (cociente 1.0 en los dos casos),
+    y cualquier cuerda proporcional al arco por un factor fijo (mismo
+    cociente en los dos casos) -- ninguna de las dos las caza una cota
+    suelta del estilo "0.80 < ratio < 0.99", que es la clase de asercion
+    que en este repo ya paso con implementaciones correctas y equivocadas.
+
+    Se comparan 0.70 y 1.30 rad y no un barrido mas ancho. MEDIDO: a 0.25
+    rad (radio 880 mm) el cociente sube a 0.843 en vez de acercarse a 1, y
+    la monotonia se rompe. No es un defecto de la cuerda -- es que con esa
+    curvatura el fruto es casi recto y los extremos de la curva EXTERIOR
+    recortada los fija el criterio del pedicelo, no la curvatura. Fijar una
+    monotonia que solo se cumple a trozos seria afirmar mas de lo que se
+    verifico.
+    """
+    cfg = _cfg()
+    arc_length_mm = RADIUS_MM * ARC_RAD
+    ratios = []
+    for arc_rad in (0.70, 1.30):
+        mask, _gt = make_banana(
+            arc_length_mm / arc_rad, arc_rad, 24.0, MM_PER_PX,
+            pedicel_mm=PEDICEL_MM, pedicel_width_mm=6.0,
+        )
+        m = measure_mask(mask, MM_PER_PX, cfg)
+        assert m is not None
+        assert m.chord_mm < m.codex_length_mm
+        ratios.append(m.chord_mm / m.codex_length_mm)
+
+    gentle, sharp = ratios
+    assert sharp < gentle - 0.05, (
+        f"duplicar la curvatura casi no cambio el cociente: {gentle:.3f} -> {sharp:.3f}"
+    )

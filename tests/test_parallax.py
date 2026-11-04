@@ -44,6 +44,7 @@ import pytest
 
 from codex_caliper.config import AppConfig
 from codex_caliper.geometry.measures import (
+    BananaMeasures,
     _area_mm2,
     _volume_mm3,
     measure_mask,
@@ -324,3 +325,37 @@ def test_misconfigured_rig_does_not_raise(raw):
     assert corrected.caliper_mm == pytest.approx(raw.caliper_mm)
     assert corrected.area_mm2 == pytest.approx(raw.area_mm2)
     assert corrected.volume_mm3 == pytest.approx(raw.volume_mm3)
+
+
+def test_parallax_scales_the_chord_exactly_like_the_length():
+    """La cuerda es una longitud fisica en el plano del fruto, igual que el
+    arco Codex: el paralaje la infla lo mismo y hay que corregirla lo mismo.
+
+    Rechaza la implementacion que anade ``chord_mm`` al dataclass y se
+    olvida de corregirlo. Ese olvido no lanza nada y es casi invisible: la
+    cuerda saldria ~6.5% mas larga de lo que toca sobre un banano real,
+    justo la magnitud de esta correccion, y el ratio cuerda/arco que la
+    interfaz publica como argumento del proyecto saldria sesgado en esa
+    misma proporcion. Se compara el COCIENTE, no el valor absoluto: lo que
+    este test fija es que las dos magnitudes viajan juntas.
+    """
+    cfg = AppConfig(marker_thickness_mm=2.0, working_distance_mm=270.0)
+    raw = BananaMeasures(
+        codex_length_mm=257.0,
+        caliper_mm=39.0,
+        area_mm2=1000.0,
+        volume_mm3=50_000.0,
+        chord_mm=209.0,
+        width_profile=(np.array([]), np.array([])),
+        contour_px=np.empty((0, 2)),
+        axis_path_px=np.empty((0, 2)),
+        axis_tips_px=(np.zeros(2), np.zeros(2)),
+        outer_curve_px=np.empty((0, 2)),
+    )
+
+    corrected = correct_measures(raw, cfg)
+
+    assert corrected.chord_mm < raw.chord_mm
+    assert corrected.chord_mm / corrected.codex_length_mm == pytest.approx(
+        raw.chord_mm / raw.codex_length_mm, rel=1e-12
+    )

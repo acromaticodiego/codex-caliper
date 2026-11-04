@@ -60,7 +60,13 @@ from codex_caliper.aggregation import TEMPORAL_WINDOW, TrackAggregate
 from codex_caliper.ui.main_window import RESIDUAL_WARN_MM, MainWindow
 from codex_caliper.ui.overlay import text_anchor_for
 from codex_caliper.ui.side_panel import SIDE_PANEL_WIDTH_PX, SidePanel
-from codex_caliper.ui.video_view import PIP_MIN_WIDTH_PX, PIP_SCALE, VideoView
+from codex_caliper.ui.video_view import (
+    _PIP_MARGIN_PX,
+    _pip_origin_px,
+    PIP_MIN_WIDTH_PX,
+    PIP_SCALE,
+    VideoView,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +126,7 @@ def _aggregate(*, track_id: int = 1, locked: bool = True, samples: int = 30) -> 
         length_std_mm=0.8,
         caliper_mm=38.4,
         caliper_std_mm=0.5,
+        chord_mm=152.0,
         volume_mm3=1.0e5,
         window=TEMPORAL_WINDOW,
     )
@@ -1285,3 +1292,33 @@ def test_measurement_stays_enabled_with_placeholder_intrinsics(qtbot):
     assert window.blocked_reason() == ""
 
     window.close()
+
+
+def test_the_pip_sits_at_the_bottom_centre_so_it_covers_no_marker():
+    """Los 4 ArUcos viven en las ESQUINAS del lienzo por construccion, asi
+    que un PiP anclado a una esquina tapa siempre uno -- en la grabacion
+    tapaba el #1. El centro inferior es la unica franja del borde sin
+    marcador.
+
+    Rechaza el anclaje anterior (abajo a la DERECHA): con un widget de
+    1000 px y un PiP de 200, aquel daba x = 788 y este da x = 400. La
+    coordenada vertical no cambia: pegado abajo es correcto, lo que estaba
+    mal era el lado.
+    """
+    x, y = _pip_origin_px(widget_width_px=1000, widget_height_px=700, pip_width_px=200, pip_height_px=120)
+
+    assert x == 400, f"el PiP no quedo centrado en horizontal: x={x}"
+    assert y == 700 - 120 - _PIP_MARGIN_PX
+
+
+def test_the_pip_origin_never_goes_negative_on_a_widget_narrower_than_itself():
+    """Con el widget mas estrecho que el propio PiP, centrar daria una
+    coordenada NEGATIVA y Qt recortaria por la izquierda.
+
+    Rechaza una implementacion que centre con una resta pelada sin
+    acotar en 0.
+    """
+    x, y = _pip_origin_px(widget_width_px=100, widget_height_px=80, pip_width_px=200, pip_height_px=120)
+
+    assert x == 0
+    assert y == 0

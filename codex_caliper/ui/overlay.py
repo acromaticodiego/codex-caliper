@@ -44,20 +44,8 @@ mide exactamente esto -- a 0.2 mm/px una ambiguedad de borde de 1 px son
 0.2 mm, asi que el sistema no puede reclamar mas resolucion que la de su
 propio lienzo, sin importar cuanto se asiente la dispersion temporal.
 
-``format_measurement(value_mm, std_mm, floor_mm=_CANVAS_MM_PER_PX)`` aplica
-el piso como PRIMER paso, incondicionalmente, antes de decidir decimales --
-y lo hace DENTRO de ``_round_to_one_sig_fig``, la primitiva, no en esta
-funcion (ronda 1 de revision: el piso vivia una capa por encima, asi que
-cualquier otro llamador interno futuro de la primitiva quedaba sin
-proteccion). El parametro tiene un default (la escala fija del lienzo del
-rig, S5.1) para que un caller que lo OLVIDE siga protegido. Un caller que
-pase un ``floor_mm`` explicito invalido (<= 0, que solo puede llegar por un
-defecto aguas arriba) no queda "protegido" en silencio con el default: la
-primitiva lanza ``ValueError`` -- ensanchar un piso roto a 0.2 mm mentiria
-hacia arriba en un montaje con lienzo mas fino (ver docstring de
-``_round_to_one_sig_fig``). ``draw_results`` si pasa el ``mm_per_px`` real
-de cada frame explicitamente, porque esa es la escala verdadera de ESA
-calibracion y puede ser mas fina que el default si el montaje cambia.
+El piso y la regla de decimales viven ahora en ``readout.py``, junto a
+``format_measurement``: este modulo dibuja, no decide cifras.
 """
 
 from __future__ import annotations
@@ -69,12 +57,12 @@ import numpy as np
 
 from codex_caliper.aruco_tools import CalibrationState, MarkerDetection, calibration_state
 from codex_caliper.pipeline import BananaResult
+from codex_caliper.ui.readout import compose_canvas_tag
 
 #: Escala del lienzo rectificado del rig (spec S5.1, S7). Es el default del
 #: piso de incertidumbre de ``format_measurement``, no un valor operativo
 #: que este modulo decida: si el montaje cambia de escala, ``draw_results``
 #: ya pasa el ``mm_per_px`` real de cada frame y ese valor manda.
-_CANVAS_MM_PER_PX = 0.2
 
 #: Margen en pixeles entre el borde de la mascara y el texto que seria
 #: ancla (Ruling 1: no hay bbox, se deriva de la mascara). Mismo numero para
@@ -83,7 +71,7 @@ _LABEL_MARGIN_PX = 10
 
 #: Alto de linea del bloque de texto, en pixeles, a la escala de fuente
 #: fija de este modulo (``_FONT_SCALE``).
-_LINE_HEIGHT_PX = 18
+_LINE_HEIGHT_PX = 34
 
 #: Ancho presupuestado, en pixeles, para cualquier linea que este modulo
 #: dibuje a su fuente fija (ronda 1 de revision, Finding 2). No se mide
@@ -91,21 +79,34 @@ _LINE_HEIGHT_PX = 18
 #: contenido exacto del texto -- se reserva un presupuesto generoso una
 #: sola vez, igual que ``_LINE_HEIGHT_PX`` ya hace con el alto. La linea
 #: mas larga real ("CAL 999.9 +/- 99.9 mm") cabe con margen de sobra.
-_LABEL_BLOCK_WIDTH_PX = 220
+_LABEL_BLOCK_WIDTH_PX = 190
 
 #: Lineas maximas que ``compose_label_lines`` puede devolver (veredicto,
 #: L, CAL, peso -- el mockup completo de S8). Solo se usa para reservar
 #: espacio VERTICAL al anclar (Finding 2); no decide que se muestra.
-_LABEL_MAX_LINES = 4
+_LABEL_MAX_LINES = 1
 
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
-_FONT_SCALE = 0.5
-_TEXT_THICKNESS = 1
-#: Grosor del trazo negro de contorno. Mas grueso que el relleno para que
-#: sobreviva un fondo bananero: amarillo saturado contra blanco relleno es
-#: el caso que mas cuesta leer, y el contorno negro es legible sobre
-#: cualquiera de los dos. No depender solo del color para el contraste.
-_OUTLINE_THICKNESS = 3
+#: Escala y grosores dimensionados para que el texto se LEA EN VIDEO, que
+#: es a lo que esta cadena de cotas se destina (spec S13: el video en vivo
+#: es lo primero que se publica, y se ve en un movil). Los valores
+#: anteriores -- escala 0.5, relleno 1, contorno 3 -- tenian dos defectos
+#: que solo aparecen al renderizar una linea real a resolucion nativa:
+#:
+#: 1. El contorno era TRES VECES el grosor del relleno, asi que en una
+#:    linea densa como "CAL 38.9 +/- 0.2 mm" los halos de letras contiguas
+#:    se tocaban y rellenaban los huecos: el texto se leia como una mancha
+#:    en negrita, con el espaciado aparentemente roto.
+#: 2. A escala 0.5 el bloque ocupaba ~180 px de un lienzo de ~1240, ilegible
+#:    en la pantalla de un telefono.
+#:
+#: El contorno sigue siendo mas grueso que el relleno -- es la defensa de
+#: legibilidad contra el amarillo saturado del banano, y no se depende solo
+#: del color para el contraste -- pero ahora en proporcion al trazo, no
+#: ahogandolo.
+_FONT_SCALE = 1.0
+_TEXT_THICKNESS = 2
+_OUTLINE_THICKNESS = 6
 
 #: Colores en BGR (convencion de OpenCV). El texto nunca distingue estados
 #: SOLO por color -- "OK"/"FAIL" y la presencia/ausencia de la barra de
@@ -125,6 +126,12 @@ _COLOR_FAIL = (40, 40, 230)
 #: "midiendo" de "fijo": el contenido ya lo hace (la barra de progreso y la
 #: ausencia de OK/FAIL), este cambio solo corrige que el refuerzo de color
 #: sea LEGIBLE, no que sea el unico canal.
+#: Gris OSCURO, no claro. Se intento aclararlo al rediseñar la lectura y
+#: ``test_unlocked_label_fill_has_real_contrast_on_a_white_card`` lo
+#: rechazo con razon: el rotulo se ancla al lado de la mascara, o sea
+#: sobre el CARTON BLANCO casi siempre, y un relleno claro ahi desaparece
+#: -- el defecto que este mismo valor arreglo en su dia. El contraste
+#: contra el amarillo del banano lo da el halo negro, no el relleno.
 _COLOR_MEASURING = (90, 90, 90)
 
 _MARKER_COLORS = {
@@ -172,73 +179,6 @@ _CHORD_GAP_PX = 9
 _COLOR_CODEX_CURVE = (225, 155, 15)
 _CODEX_CURVE_THICKNESS_PX = 3
 _CODEX_CURVE_HALO_THICKNESS_PX = 6
-
-
-def format_measurement(value_mm: float, std_mm: float, floor_mm: float = _CANVAS_MM_PER_PX) -> str:
-    """Formatea ``value_mm ± std_mm`` con tantos decimales como la incertidumbre sostenga.
-
-    Convencion de metrologia: la incertidumbre se redondea a 1 cifra
-    significativa, y el VALOR se redondea al mismo lugar decimal que esa
-    incertidumbre redondeada -- no al reves, y no por una cadena de
-    umbrales ad hoc. A 0.82 mm de incertidumbre (redondea a 0.8, un
-    decimal) el valor se imprime con un decimal; a 5.0 mm (redondea a 5,
-    cero decimales) el valor se imprime entero.
-
-    El piso de incertidumbre (Ruling 2) se aplica dentro de
-    ``_round_to_one_sig_fig``, no aqui -- ver esa funcion para el porque
-    (ronda 1 de revision: el piso vivia en esta funcion y cualquier otro
-    llamador interno futuro de la primitiva quedaba sin proteccion).
-    """
-    std_rounded, decimals = _round_to_one_sig_fig(std_mm, floor_mm)
-    return f"{value_mm:.{decimals}f} ± {std_rounded:.{decimals}f} mm"
-
-
-def _round_to_one_sig_fig(std_mm: float, floor_mm: float) -> tuple[float, int]:
-    """Aplica el piso de incertidumbre y redondea a 1 cifra significativa.
-
-    Devuelve ``(redondeado, decimales)``. ``decimales`` es cuantos
-    decimales hacen falta para representar EXACTAMENTE el valor ya
-    redondeado -- no el original, porque redondear puede subir un orden
-    de magnitud (0.96 -> 1.0) y los decimales tienen que seguir al
-    resultado, no al punto de partida.
-
-    El piso se aplica AQUI, como primer paso, DENTRO de la primitiva --
-    no en una capa por encima (ronda 1 de revision). ``format_measurement``
-    es hoy el unico llamador, pero la proteccion no depende de que siga
-    siendolo: cualquier llamador interno futuro de esta funcion la hereda
-    sin tener que acordarse de aplicarla el mismo.
-
-    ``floor_mm`` tiene que ser una escala fisica POSITIVA -- el mm/px de
-    la calibracion de ESE frame (Ruling 2), no un limite absoluto del
-    proyecto. La revision de la ronda 1 propuso clavarlo a
-    ``max(floor_mm, _CANVAS_MM_PER_PX)``; se rechaza a proposito: un
-    montaje con un lienzo mas fino (S5.1 llega a ~0.07 mm/px con otra
-    focal) tiene derecho a reportar esa resolucion mas fina, y forzar un
-    piso de 0.2 mm por encima de lo que pide el caller mentiria HACIA
-    ARRIBA -- el anti-objetivo de falsa precision (S4) corre en ambas
-    direcciones, no solo "menos decimales de los que hacen falta".
-
-    Lo que SI hay que rechazar no es un piso fino, es un piso que no es
-    un piso en absoluto: ``floor_mm <= 0`` solo puede llegar por un
-    defecto aguas arriba (p.ej. un ``mm_per_px`` de calibracion en 0.0 por
-    un fallo de ``compute_plane_calibration``), y este proyecto ya tiene
-    la convencion de dejar propagar ese tipo de error en vez de
-    enmascararlo con un valor por defecto silencioso (``pipeline.py``
-    deja propagar ``DegenerateMarkerLayout`` por la misma razon: un error
-    de programacion aguas arriba tiene que verse). Por eso se lanza
-    ``ValueError`` en vez de reinterpretar un piso roto como "usa 0.2
-    entonces" -- una excepcion ruidosa aqui es preferible a una cifra con
-    precision falsa que se ve bien en pantalla.
-    """
-    if floor_mm <= 0:
-        raise ValueError(f"floor_mm debe ser una escala fisica positiva (mm/px); llego {floor_mm!r}")
-    std_effective = max(std_mm, floor_mm)
-    exponent = math.floor(math.log10(std_effective))
-    rounded = round(std_effective, -exponent)
-    if rounded > 0:
-        exponent = math.floor(math.log10(rounded))
-    decimals = max(0, -exponent)
-    return rounded, decimals
 
 
 def text_anchor_for(mask: np.ndarray) -> tuple[int, int]:
@@ -334,107 +274,6 @@ def text_anchor_for(mask: np.ndarray) -> tuple[int, int]:
     y = max(0, min(y, max(0, canvas_h - block_h)))
 
     return x, y
-
-
-def _progress_bar(samples: int, window: int, segments: int = 4) -> str:
-    """Barra ASCII de progreso (p.ej. ``"###."``) -- ver nota de glifos en ``draw_results``.
-
-    ``window`` no tiene default (ronda de correcciones finales, I7): antes
-    caia a ``TEMPORAL_WINDOW`` (30, la constante de modulo de
-    ``aggregation.py``), asi que un montaje con ``cfg.temporal_window``
-    distinto -- un campo de config documentado, no un caso exotico --
-    mostraba una barra llena (y un cociente recortado por ``min(..., 1.0)``)
-    sobre una medida que todavia no se asento. El denominador real es
-    ``aggregate.window`` (ver ``TrackAggregate.window``), no esta constante.
-    """
-    fraction = min(samples / window, 1.0)
-    filled = round(fraction * segments)
-    return "#" * filled + "." * (segments - filled)
-
-
-def compose_label_lines(result: BananaResult, mm_per_px: float) -> list[str]:
-    """Lineas de texto del rotulo de un banano, en el orden del mockup (spec S8).
-
-    Funcion PURA que devuelve cadenas (Ruling 3 del encargo): el brief
-    pedia leer texto de vuelta de una imagen ya dibujada
-    (``rendered_text_of``), que es OCR y no se puede escribir de forma
-    fiable. Aqui se prueba la composicion sin pasar por pixeles, y
-    ``draw_results`` solo coloca estas cadenas.
-
-    Decision revertida (fix de la demo de LinkedIn): ya NO se oculta L/CAL
-    mientras el agregado no esta ``locked``
-    -----------------------------------------------------------------------
-    La version original de esta funcion (ver commit de Task 17) ocultaba
-    L/CAL/peso por completo mientras ``locked`` era ``False``, mostrando
-    solo el id y la barra de progreso -- el razonamiento de entonces era
-    evitar un veredicto pass/fail que cambia de cuadro a cuadro con la
-    interfaz mostrandolo como definitivo. Esa razon sigue siendo VALIDA
-    para el VEREDICTO (sigue oculto mientras no este ``locked``, mas
-    abajo), pero resulto demasiado ancha: en una demo real, con el calibre
-    estable en sigma 0.33 mm pero la longitud con sigma 5.16 mm (contra un
-    umbral de ``lock`` de 1.0 mm en AMBOS -- umbral correcto, no se toca,
-    ver ``aggregation.py``), el agregado nunca llega a ``locked`` con la
-    ventana llena (30/30) y el panel se queda mostrando una barra de
-    progreso llena para siempre, sin un solo numero -- exactamente el
-    anti-objetivo de spec S4 ("ocultar limitaciones"), solo que disfrazado
-    de prudencia.
-
-    ``format_measurement`` ya existe PRECISAMENTE para mostrar una cifra
-    honesta bajo incertidumbre (su ``±``, y su piso a la escala del
-    lienzo): no hace falta "cifra definitiva" para mostrar "257 ± 5 mm",
-    que es verdad desde el primer cuadro y se hace mas angosto a medida
-    que la ventana se asienta. Por eso L/CAL se muestran SIEMPRE -- el
-    espectador ve la medida asentarse en vivo, que es mejor material de
-    demo que una barra sin numeros Y mas honesto (spec S4 corre en ambas
-    direcciones: ni falsa precision, ni ocultar lo que si se sabe).
-
-    Lo que SIGUE oculto mientras no esta ``locked``:
-
-    - El VEREDICTO ("OK"/"FAIL"): a diferencia de L/CAL, se imprime sin
-      incertidumbre -- es una comparacion contra dos umbrales, no una
-      magnitud con un ``±`` que lo salve de parecer definitivo. En su
-      lugar el encabezado mantiene el id y la barra de progreso (que
-      ``locked`` SI apaga, mas abajo -- la unica senal de "ya no esta
-      progresando, esta fija").
-    - El PESO: igual que el veredicto, se imprime como un entero sin
-      ninguna incertidumbre mostrada (``round(estimated_weight_g)``); sin
-      un ``±`` que lo acompane, mostrarlo antes de ``locked`` seria
-      precision falsa de la misma forma que el veredicto, no la honestidad
-      que S4 pide. Se mantiene con la regla ORIGINAL (solo si ``locked`` y
-      no ``None``).
-
-    ``_label_color`` (abajo) sigue distinguiendo ``locked`` de no-``locked``
-    por color (gris "midiendo" vs. verde/rojo de veredicto) -- el lock
-    sigue siendo informacion real, solo que ya no es la condicion para
-    mostrar ningun numero.
-    """
-    aggregate = result.aggregate
-    if aggregate.locked:
-        verdict_word = "OK" if result.verdict.passes else "FAIL"
-        header = f"#{result.track_id} {verdict_word}"
-        lines = [header]
-    else:
-        # I7: el denominador es ``aggregate.window`` (la ventana REAL con la
-        # que este agregado se armo, Task 11/I7), no la constante de modulo
-        # ``TEMPORAL_WINDOW`` -- ver docstring de ``_progress_bar``. La
-        # barra de progreso sigue siendo la UNICA senal de "todavia no esta
-        # fijo" ahora que L/CAL ya no se ocultan (ver docstring de arriba).
-        header = f"#{result.track_id}"
-        progress = f"{_progress_bar(aggregate.samples, aggregate.window)} {aggregate.samples}/{aggregate.window}"
-        lines = [header, progress]
-
-    lines.append(f"L {format_measurement(aggregate.length_mm, aggregate.length_std_mm, mm_per_px)}")
-    lines.append(f"CAL {format_measurement(aggregate.caliper_mm, aggregate.caliper_std_mm, mm_per_px)}")
-
-    if aggregate.locked and result.estimated_weight_g is not None:
-        lines.append(f"{round(result.estimated_weight_g)} g")
-    return lines
-
-
-def _label_color(result: BananaResult) -> tuple[int, int, int]:
-    if not result.aggregate.locked:
-        return _COLOR_MEASURING
-    return _COLOR_PASS if result.verdict.passes else _COLOR_FAIL
 
 
 def _draw_outlined_text(canvas: np.ndarray, text: str, origin: tuple[int, int], color: tuple[int, int, int]) -> None:
@@ -545,6 +384,25 @@ def _draw_dashed_line(canvas: np.ndarray, point_a: np.ndarray, point_b: np.ndarr
         drawing = not drawing
 
 
+def _chord_endpoints(result: BananaResult) -> tuple[np.ndarray, np.ndarray] | None:
+    """Los dos extremos de la cuerda: los de la CURVA CODEX, no los del eje.
+
+    Comparten extremos con el arco a proposito. Asi el hueco entre la recta
+    a trazos y la curva es exactamente la curvatura, que es lo que el video
+    quiere mostrar y lo que ``readout`` publica como porcentaje -- los dos
+    leen la misma geometria. Tomarlos de ``axis_tips_px`` (la version
+    anterior) daba una recta que arrancaba en el pedicelo mientras el arco
+    arrancaba despues de el: las dos lineas no se podian comparar a ojo.
+
+    ``None`` si no hay curva que acotar -- un ``BananaResult`` de prueba
+    sin geometria.
+    """
+    curve = result.outer_curve_px
+    if curve is None or len(curve) < 2:
+        return None
+    return np.asarray(curve[0], dtype=float), np.asarray(curve[-1], dtype=float)
+
+
 def _draw_geometry(canvas: np.ndarray, result: BananaResult) -> None:
     """Dibuja la geometria del METODO para ``result``, sobre ``canvas`` (que
     ``draw_results`` ya sabe que es una copia).
@@ -578,8 +436,12 @@ def _draw_geometry(canvas: np.ndarray, result: BananaResult) -> None:
     """
     _draw_polyline(canvas, result.contour_px, _COLOR_CONTOUR, _CONTOUR_THICKNESS_PX, closed=True)
     _draw_polyline(canvas, result.axis_path_px, _COLOR_AXIS, _AXIS_THICKNESS_PX, closed=False)
-    tip_a, tip_b = result.axis_tips_px
-    _draw_dashed_line(canvas, tip_a, tip_b, _COLOR_CHORD, _CHORD_THICKNESS_PX, _CHORD_DASH_PX, _CHORD_GAP_PX)
+    chord = _chord_endpoints(result)
+    if chord is not None:
+        _draw_dashed_line(
+            canvas, chord[0], chord[1], _COLOR_CHORD,
+            _CHORD_THICKNESS_PX, _CHORD_DASH_PX, _CHORD_GAP_PX,
+        )
     _draw_haloed_polyline(
         canvas,
         result.outer_curve_px,
@@ -622,12 +484,22 @@ def draw_results(canvas: np.ndarray, results: list[BananaResult], mm_per_px: flo
     out = canvas.copy()
     for result in results:
         _draw_geometry(out, result)
-        lines = compose_label_lines(result, mm_per_px)
-        color = _label_color(result)
-        x, y = text_anchor_for(result.mask)
-        for i, line in enumerate(lines):
-            _draw_outlined_text(out, line, (x, y + i * _LINE_HEIGHT_PX), color)
+        _draw_outlined_text(
+            out,
+            compose_canvas_tag(result),
+            text_anchor_for(result.mask),
+            _tag_color(result),
+        )
     return out
+
+
+def _tag_color(result: BananaResult) -> tuple[int, int, int]:
+    """Color del rotulo del lienzo. Es un REFUERZO, nunca el unico canal:
+    el propio texto ya dice "PASS"/"FAIL" o el conteo de la ventana, asi
+    que perder el color (escala de grises, daltonismo) no pierde nada."""
+    if not result.aggregate.locked:
+        return _COLOR_MEASURING
+    return _COLOR_PASS if result.verdict.passes else _COLOR_FAIL
 
 
 def draw_marker_overlay(frame: np.ndarray, detections: list[MarkerDetection]) -> np.ndarray:
@@ -648,7 +520,28 @@ def draw_marker_overlay(frame: np.ndarray, detections: list[MarkerDetection]) ->
     for detection in detections:
         pts = detection.corners.astype(np.int32).reshape(-1, 1, 2)
         cv2.polylines(out, [pts], isClosed=True, color=color, thickness=2)
-        label_x = int(detection.corners[:, 0].min())
-        label_y = int(detection.corners[:, 1].min()) - 6
-        _draw_outlined_text(out, f"#{detection.id}", (label_x, label_y), color)
+        _draw_marker_id(out, detection, color)
     return out
+
+
+def _draw_marker_id(canvas: np.ndarray, detection: MarkerDetection, color: tuple[int, int, int]) -> None:
+    """Escribe ``#id`` CENTRADO dentro del cuadrilatero del marcador.
+
+    Antes se anclaba arriba a la izquierda y por FUERA del marcador
+    (``min y - 6``). Los cuatro marcadores del rig viven en las esquinas
+    del lienzo por construccion, asi que ese "por fuera" cae fuera del
+    lienzo: en la grabacion de la demo dos de los cuatro ids no se veian.
+    Dentro del cuadrilatero la etiqueta esta atada al marcador -- si el
+    marcador se ve, el id se ve -- y ademas deja de poder confundirse con
+    la del marcador de al lado.
+
+    El marcador mide ~120 px de lado en el lienzo del rig y el texto a la
+    escala de este modulo ronda los 30 px de alto, asi que cabe con
+    holgura. Si no cupiera, el texto se saldria del cuadrilatero pero
+    seguiria dentro del lienzo, que es el fallo benigno de los dos.
+    """
+    centre = detection.corners.mean(axis=0)
+    text = f"#{detection.id}"
+    (text_w, text_h), _baseline = cv2.getTextSize(text, _FONT, _FONT_SCALE, _TEXT_THICKNESS)
+    origin = (int(round(centre[0] - text_w / 2.0)), int(round(centre[1] + text_h / 2.0)))
+    _draw_outlined_text(canvas, text, origin, color)

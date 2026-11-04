@@ -5,85 +5,188 @@ de dejar que un ``QHBoxLayout`` lo reparta por stretch) es lo que hace que
 al maximizar la ventana crezca el video y no el panel -- la decision
 vinculante de la encargante, no una preferencia de implementacion.
 
-El contenido de cada tarjeta reusa ``compose_label_lines`` de
-``overlay.py`` (Task 17) en vez de reimplementar el formato del veredicto
-y las medidas: es la misma funcion PURA que decide que mostrar sobre el
-video, asi que el panel y el overlay nunca pueden mostrar numeros
-distintos para el mismo fruto.
+El contenido sale de ``readout.compose_readout`` -- la misma fuente de la
+que ``overlay.py`` saca el rotulo del video -- en vez de reimplementar el
+formato: panel y overlay no pueden discrepar sobre el mismo fruto.
+
+Aqui vive la lectura COMPLETA y sobre el video solo queda un rotulo de una
+linea. El reparto es deliberado: sobre el fruto el texto competia con la
+curva Codex (la protagonista, y literalmente la geometria detras del
+numero) y quedaba ilegible en gris sobre amarillo; aqui hay sitio para
+decir contra que minimo de CODEX STAN 205 se compara cada medida, que es
+lo que vuelve la cifra entendible por alguien que no escribio el programa.
+
+Cada fila es "nombre / valor / minimo exigido", y debajo va el contraste
+cuerda-contra-arco: el argumento del proyecto en dos numeros y un
+porcentaje -- una caja contenedora mide la recta entre las puntas, la
+norma exige el arco.
 """
 
 from __future__ import annotations
 
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
 
 from codex_caliper.pipeline import BananaResult
-from codex_caliper.ui.overlay import compose_label_lines
+from codex_caliper.ui.readout import MeasurementReadout, compose_readout
 from codex_caliper.ui.theme import (
     INK_MUTED_HEX,
     INK_PRIMARY_HEX,
     RULE_HEX,
     SIGNAL_FAIL_HEX,
     SIGNAL_PASS_HEX,
+    SIGNAL_WARN_HEX,
     SURFACE_HEX,
 )
 
 #: Ancho fijo del panel, en pixeles (spec S8, vinculante).
-SIDE_PANEL_WIDTH_PX = 240
+SIDE_PANEL_WIDTH_PX = 290
 
 _EMPTY_STATE_TEXT = "No fruit detected"
 
 
-def _header_color(result: BananaResult) -> str:
-    """Color del encabezado de la tarjeta.
-
-    El color es un REFUERZO, no el unico canal: el texto de
-    ``compose_label_lines`` ya dice "OK"/"FAIL" o el id a secas mientras se
-    mide, asi que perder el color (p.ej. en escala de grises) no pierde la
-    informacion.
-    """
-    if not result.aggregate.locked:
+def _verdict_color(readout: MeasurementReadout) -> str:
+    """Color del veredicto. REFUERZO, nunca el unico canal: el texto ya
+    dice "PASS"/"FAIL" o "MEASURING n/m", asi que en escala de grises no
+    se pierde nada."""
+    if not readout.locked:
         return INK_MUTED_HEX
-    return SIGNAL_PASS_HEX if result.verdict.passes else SIGNAL_FAIL_HEX
+    return SIGNAL_PASS_HEX if readout.verdict == "PASS" else SIGNAL_FAIL_HEX
+
+
+def _row_color(meets: bool | None) -> str:
+    """``None`` -- todavia midiendo -- se pinta neutro, no rojo: "aun no se
+    sabe" no es "no cumple"."""
+    if meets is None:
+        return INK_PRIMARY_HEX
+    return SIGNAL_PASS_HEX if meets else SIGNAL_FAIL_HEX
+
+
+def _label(text: str, *, size: int, color: str, bold: bool = False,
+           mono: bool = False, spacing: float = 0.0) -> QLabel:
+    label = QLabel(text)
+    font = QFont("Consolas" if mono else "Segoe UI", size)
+    if bold:
+        font.setWeight(QFont.Weight.DemiBold)
+    if spacing:
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, spacing)
+    label.setFont(font)
+    label.setStyleSheet(f"color: {color}; border: none;")
+    return label
+
+
+def _build_measurement_row(row, layout: QVBoxLayout) -> None:
+    """Una medida: nombre en versalitas apagadas, cifra grande, y debajo el
+    minimo de la norma con el que se la juzga.
+
+    El minimo no es decoracion: "271 mm" a secas no dice si cumple, y es
+    justo lo que el encargo señalaba como no entendible por nadie salvo el
+    autor.
+    """
+    layout.addWidget(_label(row.name, size=8, color=INK_MUTED_HEX, spacing=1.2))
+
+    value_line = QWidget()
+    value_layout = QHBoxLayout(value_line)
+    value_layout.setContentsMargins(0, 0, 0, 0)
+    value_layout.setSpacing(6)
+    value_layout.addWidget(_label(row.value, size=14, color=_row_color(row.meets), bold=True, mono=True))
+    value_layout.addStretch(1)
+    if row.meets is not None:
+        value_layout.addWidget(
+            _label("PASS" if row.meets else "FAIL", size=9, color=_row_color(row.meets), bold=True)
+        )
+    layout.addWidget(value_line)
+
+    layout.addWidget(_label(f"CODEX {row.requirement}", size=8, color=INK_MUTED_HEX))
 
 
 def _build_card(result: BananaResult, mm_per_px: float) -> QFrame:
-    """Construye la tarjeta de un ``BananaResult``, con las lineas de
-    ``compose_label_lines`` -- la misma composicion que ``draw_results``
-    pone sobre el video."""
+    """Ficha completa de un fruto, compuesta desde ``compose_readout``."""
+    readout = compose_readout(result, mm_per_px)
+
     card = QFrame()
     card.setStyleSheet(
         f"QFrame {{ background-color: {SURFACE_HEX}; border: 1px solid {RULE_HEX}; }}"
     )
     layout = QVBoxLayout(card)
-    layout.setContentsMargins(10, 8, 10, 8)
-    layout.setSpacing(3)
+    layout.setContentsMargins(12, 10, 12, 10)
+    layout.setSpacing(2)
 
-    lines = compose_label_lines(result, mm_per_px)
-    header_color = _header_color(result)
-
-    header = QLabel(lines[0])
-    header.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
-    header.setStyleSheet(f"color: {header_color}; border: none;")
+    header = QWidget()
+    header_layout = QHBoxLayout(header)
+    header_layout.setContentsMargins(0, 0, 0, 0)
+    header_layout.addWidget(_label(readout.title, size=10, color=INK_PRIMARY_HEX, bold=True, spacing=0.8))
+    header_layout.addStretch(1)
+    header_layout.addWidget(
+        _label(readout.verdict or readout.status, size=9, color=_verdict_color(readout), bold=True)
+    )
     layout.addWidget(header)
+    if readout.verdict is not None:
+        layout.addWidget(_label(readout.status, size=8, color=INK_MUTED_HEX))
 
-    mono_font = QFont("Consolas", 10)
-    for line in lines[1:]:
-        label = QLabel(line)
-        label.setFont(mono_font)
-        label.setStyleSheet(f"color: {INK_PRIMARY_HEX}; border: none;")
-        layout.addWidget(label)
+    for row in readout.rows:
+        layout.addSpacing(8)
+        _build_measurement_row(row, layout)
+
+    layout.addSpacing(10)
+    rule = QFrame()
+    rule.setFrameShape(QFrame.Shape.HLine)
+    rule.setStyleSheet(f"color: {RULE_HEX}; border: none; background-color: {RULE_HEX};")
+    rule.setFixedHeight(1)
+    layout.addWidget(rule)
+    layout.addSpacing(6)
+
+    # El argumento del proyecto, en tres lineas: la recta entre los dos
+    # extremos del fruto, el arco que la norma exige entre esos MISMOS dos
+    # extremos, y cuanto se separan.
+    #
+    # La frase dice "the arc is X% longer" y no "a bounding box underreads
+    # by X%": lo que se mide es la cuerda entre los extremos del arco, no
+    # el lado de una caja contenedora. Son parecidos y no son lo mismo, y
+    # afirmar el segundo seria publicar una comparacion que este programa
+    # no ha hecho.
+    layout.addWidget(
+        _label("STRAIGHT LINE vs CODEX ARC", size=8, color=INK_MUTED_HEX, spacing=1.2)
+    )
+    layout.addWidget(
+        _label(f"straight chord   {readout.chord_mm:6.1f} mm", size=9, color=INK_MUTED_HEX, mono=True)
+    )
+    layout.addWidget(
+        _label(f"Codex arc        {readout.arc_mm:6.1f} mm", size=9, color=INK_PRIMARY_HEX, mono=True)
+    )
+    layout.addWidget(
+        _label(
+            f"the arc is {readout.curvature_gain_pct:.0f}% longer",
+            size=9,
+            color=SIGNAL_WARN_HEX,
+            bold=True,
+        )
+    )
+
+    if readout.weight_g is not None:
+        layout.addSpacing(8)
+        layout.addWidget(_label("ESTIMATED WEIGHT", size=8, color=INK_MUTED_HEX, spacing=1.2))
+        layout.addWidget(
+            _label(f"{readout.weight_g} g", size=12, color=INK_PRIMARY_HEX, bold=True, mono=True)
+        )
 
     return card
 
 
 class SidePanel(QWidget):
-    """Panel de 240 px fijos con una tarjeta por fruto rastreado.
+    """Panel de ancho fijo con una ficha por fruto rastreado.
 
     ``update_results`` reconstruye las tarjetas en cada llamada: el numero
     de frutos visibles cambia cuadro a cuadro (un fruto entra o sale de
     escena) y no hay estado que valga la pena conservar entre tarjetas --
-    ``compose_label_lines`` ya es una funcion pura del ``BananaResult``
+    ``compose_readout`` ya es una funcion pura del ``BananaResult``
     actual.
     """
 

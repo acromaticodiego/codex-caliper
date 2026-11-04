@@ -102,6 +102,27 @@ def _pip_target_width_px(
     return max(min_width_px, round(widget_width_px * scale))
 
 
+def _pip_origin_px(
+    widget_width_px: int, widget_height_px: int, pip_width_px: int, pip_height_px: int
+) -> tuple[int, int]:
+    """Esquina superior izquierda del PiP: abajo, CENTRADO en horizontal.
+
+    Centrado y no pegado a una esquina por una razon del rig, no de gusto:
+    los 4 ArUcos viven en las ESQUINAS del lienzo por construccion (son los
+    que lo definen), asi que cualquier esquina que elija el PiP tapa un
+    marcador -- en la grabacion de la demo tapaba el #1, y con el tapado no
+    se veia ni su contorno ni su id. El centro del borde inferior es la
+    unica franja del perimetro donde no hay ninguno.
+
+    Se acota en 0 en los dos ejes: con un widget mas estrecho o mas bajo
+    que el propio PiP, centrar daria una coordenada negativa y Qt
+    recortaria el PiP por el lado equivocado en vez de por el que se ve.
+    """
+    x = max(0, (widget_width_px - pip_width_px) // 2)
+    y = max(0, widget_height_px - pip_height_px - _PIP_MARGIN_PX)
+    return x, y
+
+
 def _downscale_for_pip(frame: np.ndarray, target_width_px: int) -> np.ndarray:
     """Reescala ``frame`` al ancho ``target_width_px``, antes de convertirlo a ``QPixmap``.
 
@@ -250,8 +271,10 @@ class VideoView(QWidget):
                 painter.drawPixmap(x, y, scaled)
 
             if self._pip_visible and not self.pip_pixmap.isNull():
-                x = max(0, self.width() - self.pip_pixmap.width() - _PIP_MARGIN_PX)
-                y = max(0, self.height() - self.pip_pixmap.height() - _PIP_MARGIN_PX)
+                x, y = _pip_origin_px(
+                    self.width(), self.height(),
+                    self.pip_pixmap.width(), self.pip_pixmap.height(),
+                )
                 painter.drawPixmap(x, y, self.pip_pixmap)
         finally:
             painter.end()

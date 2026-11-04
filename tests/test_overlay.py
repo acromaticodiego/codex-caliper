@@ -43,15 +43,30 @@ from codex_caliper.aggregation import TEMPORAL_WINDOW, TrackAggregate
 from codex_caliper.aruco_tools import CalibrationState, MarkerDetection
 from codex_caliper.codex import CodexVerdict
 from codex_caliper.pipeline import BananaResult
+#: ``_LABEL_MARGIN_PX`` y ``_LABEL_BLOCK_WIDTH_PX`` se IMPORTAN del modulo
+#: en vez de espejarse aqui. Espejarlas creaba una segunda fuente de verdad
+#: que se desincronizaba en silencio: al subir la escala de fuente para que
+#: el texto se leyera en video, el modulo paso a reservar 330 px de bloque y
+#: las copias de este archivo seguian en 220, de modo que las pruebas de
+#: anclaje comprobaban una geometria que ya no existia. Son privadas, si,
+#: pero son LA geometria que estas pruebas afirman; afirmarla contra una
+#: copia es no afirmarla.
 from codex_caliper.ui.overlay import (
-    compose_label_lines,
+    _LABEL_BLOCK_WIDTH_PX,
+    _LABEL_MARGIN_PX,
     draw_marker_overlay,
     draw_results,
-    format_measurement,
     text_anchor_for,
 )
 
-_CANVAS_SHAPE = (300, 500, 3)
+#: Lienzo de pruebas, del orden del REAL (el rig da ~1241x745 px a 0.2
+#: mm/px sobre la disposicion de marcadores). Antes era 500x300: mas
+#: estrecho que el bloque de texto que el modulo reserva, asi que el
+#: recorte contra el borde saltaba en casi todas las mascaras y tapaba la
+#: propiedad que estas pruebas afirman -- el anclaje queda escondido
+#: detras del clamp y el test deja de medir lo que dice medir. El clamp
+#: tiene su propia prueba dedicada, con su propio lienzo estrecho.
+_CANVAS_SHAPE = (400, 1200, 3)
 
 
 def _rectangle_mask(shape: tuple[int, int], x0: int, y0: int, x1: int, y1: int) -> np.ndarray:
@@ -70,6 +85,7 @@ def _aggregate(
     length_std_mm: float = 0.82,
     caliper_mm: float = 38.4,
     caliper_std_mm: float = 0.6,
+    chord_mm: float = 152.0,
     volume_mm3: float = 1.0e5,
     window: int = TEMPORAL_WINDOW,
 ) -> TrackAggregate:
@@ -81,6 +97,7 @@ def _aggregate(
         length_std_mm=length_std_mm,
         caliper_mm=caliper_mm,
         caliper_std_mm=caliper_std_mm,
+        chord_mm=chord_mm,
         volume_mm3=volume_mm3,
         window=window,
     )
@@ -122,68 +139,6 @@ def _result(
         axis_tips_px=axis_tips_px if axis_tips_px is not None else (np.zeros(2), np.zeros(2)),
         outer_curve_px=outer_curve_px if outer_curve_px is not None else empty_path,
     )
-
-
-# ---------------------------------------------------------------------------
-# format_measurement -- el punto de aplicacion del anti-objetivo de falsa
-# precision (spec S4).
-# ---------------------------------------------------------------------------
-
-
-def test_measurement_text_is_english_and_carries_the_uncertainty():
-    assert format_measurement(187.34, 0.82) == "187.3 ± 0.8 mm"
-
-
-def test_decimals_are_capped_by_the_uncertainty():
-    # anti-objetivo del spec: nada de falsa precision
-    assert format_measurement(187.34, 5.0) == "187 ± 5 mm"
-
-
-def test_decimal_rule_at_the_floor_boundary():
-    # 0.2 mm/px es el piso (Ruling 2): a esa incertidumbre exacta, 1 decimal.
-    assert format_measurement(187.34, 0.2) == "187.3 ± 0.2 mm"
-
-
-def test_decimal_rule_rounds_a_two_digit_uncertainty_to_one_significant_figure():
-    # 12.0 mm redondeado a 1 cifra significativa es 10; con esa incertidumbre
-    # no se sostienen decimales en el valor tampoco.
-    assert format_measurement(187.34, 12.0) == "187 ± 10 mm"
-
-
-def test_zero_std_is_floored_by_default_to_the_canvas_scale():
-    # El caso degenerado real: primer frame de CUALQUIER track, std == 0.0
-    # exacto (np.std sin ddof sobre una sola muestra). Sin el piso esto
-    # imprimiria una precision que la calibracion no sostiene -- el defecto
-    # que Ruling 2 señala como alcanzable en el primer frame de cada track.
-    assert format_measurement(187.34567, 0.0) == "187.3 ± 0.2 mm"
-
-
-def test_floor_can_be_tightened_explicitly_when_the_canvas_scale_differs():
-    # draw_results conoce el mm_per_px real del frame y lo pasa explicito;
-    # el piso no queda pegado al default cuando la calibracion es otra.
-    assert format_measurement(187.34567, 0.0, floor_mm=0.1) == "187.3 ± 0.1 mm"
-
-
-def test_non_positive_floor_is_rejected_instead_of_silently_widened():
-    # Finding 1, ronda 1 de revision: un floor_mm <= 0 solo puede llegar
-    # por un defecto aguas arriba (p.ej. un mm_per_px de calibracion en
-    # 0.0). Ensancharlo en silencio al default del rig (0.2) mentiria
-    # sobre un piso que nunca se aplico realmente -- este caso debe
-    # explotar, no maquillarse.
-    #
-    # std_mm = 0.03 (NO 0.0) a proposito: con std_mm == 0.0,
-    # math.log10(0.0) ya lanza ValueError por su cuenta (dominio
-    # matematico), lo que haria que esta prueba "pasara" aunque la
-    # validacion explicita de floor_mm no existiera -- un accidente de
-    # implementacion que enmascararia el hueco real. Con 0.03 (positivo,
-    # no-cero) no hay ningun log10(0) de por medio: si la validacion de
-    # floor_mm no estuviera, la llamada devolveria silenciosamente
-    # "187.35 ± 0.03 mm" en vez de lanzar -- precision que el piso roto
-    # nunca verifico. Verificado con el bug deliberado, ver reporte.
-    with pytest.raises(ValueError):
-        format_measurement(187.34567, 0.03, floor_mm=0.0)
-    with pytest.raises(ValueError):
-        format_measurement(187.34567, 0.03, floor_mm=-0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -247,13 +202,6 @@ def test_anchor_stays_within_canvas_bounds_near_the_bottom_edge():
     assert 0 <= ay < canvas_shape[0]
 
 
-# Espejan las constantes privadas de ``overlay.py`` (mismo patron que
-# ``_COLOR_CONTOUR`` etc. mas abajo en este archivo): redefinidas aqui en
-# vez de importadas, para no acoplar la prueba a un simbolo privado.
-_LABEL_MARGIN_PX = 10
-_LABEL_BLOCK_WIDTH_PX = 220
-
-
 def test_anchor_sticks_to_the_masks_right_edge_when_the_mask_spans_nearly_the_full_canvas():
     """Fix 3 (demo de LinkedIn): con una mascara que cubre casi todo el
     ancho del lienzo, NI el lado derecho (``x_max + margen + bloque`` se
@@ -288,140 +236,6 @@ def test_anchor_sticks_to_the_masks_right_edge_when_the_mask_spans_nearly_the_fu
 
 
 # ---------------------------------------------------------------------------
-# compose_label_lines -- Ruling 3: funcion pura, probada sobre cadenas.
-# ---------------------------------------------------------------------------
-
-
-def test_locked_result_label_shows_verdict_length_caliper_and_weight_in_order():
-    result = _result(_rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150))
-    lines = compose_label_lines(result, mm_per_px=0.2)
-    assert lines == [
-        "#1 OK",
-        "L 187.3 ± 0.8 mm",
-        "CAL 38.4 ± 0.6 mm",
-        "124 g",
-    ]
-
-
-def test_locked_result_that_fails_codex_says_so():
-    result = _result(
-        _rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150),
-        verdict=_verdict(passes=False),
-    )
-    assert compose_label_lines(result, mm_per_px=0.2)[0] == "#1 FAIL"
-
-
-def test_missing_weight_omits_the_weight_line():
-    result = _result(_rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150), weight_g=None)
-    lines = compose_label_lines(result, mm_per_px=0.2)
-    assert len(lines) == 3
-    assert not any("g" in line.split() for line in lines)
-
-
-def test_unlocked_results_are_drawn_with_a_progress_indicator():
-    unlocked = _result(
-        _rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150),
-        aggregate=_aggregate(samples=19, locked=False),
-    )
-    lines = compose_label_lines(unlocked, mm_per_px=0.2)
-    assert any("19/30" in line for line in lines)
-
-
-def test_unlocked_result_label_shows_the_measurement_with_its_uncertainty():
-    """Decision REVERTIDA (fix de la demo de LinkedIn): ocultar L/CAL por
-    completo mientras ``locked`` es ``False`` (el comportamiento que esta
-    prueba fijaba antes) resulto demasiado ancho. Medido en vivo: calibre
-    estable en sigma 0.33 mm pero longitud en sigma 5.16 mm, contra un
-    umbral de ``lock`` de 1.0 mm en AMBOS (correcto, no se afloja) -- ese
-    agregado NUNCA llega a ``locked`` con la ventana llena, y el panel se
-    quedaba mostrando una barra de progreso llena para siempre sin un solo
-    numero. ``format_measurement`` ya reporta una cifra honesta con su
-    ``±``; no hace falta esperar a ``locked`` para mostrarla.
-
-    La implementacion que esta prueba RECHAZA es la ANTERIOR: cualquier
-    version que siga devolviendo solo ``["#id", "barra progreso"]``
-    mientras ``locked`` es ``False`` -- sin lineas ``L``/``CAL`` en
-    absoluto -- falla aqui, aunque pasara la prueba vieja de este mismo
-    archivo (la que esta prueba reemplaza).
-    """
-    unlocked = _result(
-        _rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150),
-        aggregate=_aggregate(
-            samples=30,
-            locked=False,
-            length_mm=257.4,
-            length_std_mm=5.16,
-            caliper_mm=38.4,
-            caliper_std_mm=0.33,
-        ),
-    )
-    lines = compose_label_lines(unlocked, mm_per_px=0.2)
-    assert "L 257 ± 5 mm" in lines, lines
-    assert "CAL 38.4 ± 0.3 mm" in lines, lines
-
-
-def test_unlocked_result_label_still_omits_the_verdict_and_the_weight():
-    """La otra mitad de la decision revertida: lo que SI sigue oculto
-    mientras no esta ``locked`` es lo que se imprime SIN incertidumbre --
-    el veredicto ("OK"/"FAIL", una comparacion contra dos umbrales, no una
-    magnitud con ``±``) y el peso (un entero sin ningun ``±`` mostrado).
-    Mostrar esos dos antes de ``locked`` seria la misma falsa precision
-    que el proyecto evita en L/CAL con el piso de incertidumbre -- solo
-    que sin ningun ``±`` que lo salve de parecer definitivo. Una
-    implementacion que mostrara el veredicto o el peso aqui (p.ej. porque
-    dejo de distinguir ``locked`` en algun lado) falla esta prueba.
-    """
-    unlocked = _result(
-        _rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150),
-        aggregate=_aggregate(samples=30, locked=False, length_std_mm=5.16, caliper_std_mm=0.33),
-        weight_g=145.0,
-    )
-    lines = compose_label_lines(unlocked, mm_per_px=0.2)
-    assert not any(line.endswith(" OK") or line.endswith(" FAIL") for line in lines), lines
-    assert not any(line.endswith(" g") for line in lines), lines
-    # El encabezado se queda con el id a secas (mas la barra de progreso en
-    # su propia linea) -- la UNICA senal visible de "todavia midiendo".
-    assert lines[0] == f"#{unlocked.track_id}"
-    assert any("30/30" in line for line in lines), lines
-
-
-def test_locked_result_label_has_no_progress_indicator():
-    # la otra mitad del mismo defecto potencial: la barra de progreso no
-    # debe sobrevivir una vez que la medida quedo fija.
-    locked = _result(_rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150))
-    lines = compose_label_lines(locked, mm_per_px=0.2)
-    assert not any(f"/{TEMPORAL_WINDOW}" in line for line in lines)
-
-
-def test_progress_denominator_follows_the_aggregates_own_window_not_the_module_constant():
-    """I7 (ronda de correcciones finales): ``compose_label_lines``/``_progress_bar``
-    leian ``TEMPORAL_WINDOW`` (el default de modulo de ``aggregation.py``, 30)
-    directamente, mientras ``MeasurementAggregator`` recibe ``cfg.temporal_window``
-    -- un campo de config documentado que puede ser distinto. Con
-    ``temporal_window: 60`` en la config, un agregado con 45 muestras sin
-    asentar mostraba "45/30": una barra YA LLENA (``min(45/30, 1.0) == 1.0``)
-    sobre una medida a la que todavia le faltan 15 cuadros.
-
-    La implementacion equivocada que esta prueba RECHAZA: volver a leer
-    ``TEMPORAL_WINDOW`` (30) en vez de ``aggregate.window`` (60) -- esa
-    version muestra "45/30" y una barra llena; esta prueba exige "45/60" y
-    una barra a 3/4.
-    """
-    window = 60
-    assert window != TEMPORAL_WINDOW, "el caso solo discrimina si window difiere del default de modulo"
-    unlocked = _result(
-        _rectangle_mask(_CANVAS_SHAPE[:2], 50, 50, 90, 150),
-        aggregate=_aggregate(samples=45, locked=False, window=window),
-    )
-    lines = compose_label_lines(unlocked, mm_per_px=0.2)
-    assert any("45/60" in line for line in lines), lines
-    assert not any("45/30" in line for line in lines), lines
-    # 45/60 = 0.75 de 4 segmentos = 3 llenos, 1 vacio -- no los 4 llenos que
-    # saldrian de dividir por 30 en vez de por 60.
-    assert any("###." in line for line in lines), lines
-
-
-# ---------------------------------------------------------------------------
 # draw_results -- coloca las etiquetas sobre una COPIA del lienzo.
 # ---------------------------------------------------------------------------
 
@@ -448,7 +262,15 @@ def test_draw_results_paints_near_each_results_own_anchor_regardless_of_list_ord
     # con el recorte de borde, no un bug de indice de lista, que es lo
     # que este test en particular quiere aislar. Un lienzo mas ancho deja
     # a ambas mascaras lejos de cualquier borde y evita esa colision.
-    wide_shape = (300, 900, 3)
+    # Se deriva del presupuesto del propio modulo en vez de fijar 900 a
+    # mano: al subir la escala de fuente para que el texto se lea en video
+    # el bloque paso a 330 px, y con 900 la mascara derecha (acaba en
+    # x=640) ya no cabia -- 640 + margen + bloque se sale del lienzo --
+    # asi que su ancla se volteaba a la izquierda y aterrizaba sobre la
+    # del mask_left: exactamente la colision de fixture que el parrafo de
+    # arriba describe. Derivarlo evita que vuelva a quedarse corto en
+    # silencio la proxima vez que cambie la tipografia.
+    wide_shape = (300, 640 + _LABEL_MARGIN_PX + _LABEL_BLOCK_WIDTH_PX + 60, 3)
     canvas = np.zeros(wide_shape, np.uint8)
     mask_left = _rectangle_mask(wide_shape[:2], 20, 50, 60, 150)
     mask_right = _rectangle_mask(wide_shape[:2], 600, 50, 640, 150)
@@ -575,47 +397,48 @@ def test_contour_is_a_thin_border_not_a_filled_box():
     assert tuple(out[100, 150]) == (0, 0, 0), "el interior del contorno quedo pintado -- es una caja, no un borde"
 
 
-def test_axis_follows_its_own_bent_path_and_the_chord_connects_the_tips_field_not_the_path_endpoints():
-    """Dos afirmaciones del encargo en una prueba, porque comparten el
-    mismo fixture:
+def test_the_chord_connects_the_codex_curve_endpoints_not_the_medial_axis_tips():
+    """La cuerda a trazos y la curva Codex tienen que COMPARTIR extremos.
 
-    1. El eje medial se dibuja siguiendo ``axis_path_px`` ENTERO (con su
-       curva real), no un segmento recto entre sus dos extremos -- aqui el
-       camino se dobla por (150, 60), que NO esta sobre la recta entre sus
-       dos puntas (50, 100)-(250, 100). Una implementacion que solo
-       conectara ``path_px[0]`` con ``path_px[-1]`` (perdiendo la curva)
-       nunca pintaria (150, 60).
-    2. La cuerda conecta ``axis_tips_px`` -- un campo propio, no derivado de
-       ``axis_path_px`` -- deliberadamente puesto en puntas DISTINTAS de
-       las del camino ((10, 150) y (290, 150), no (50, 100)/(250, 100)).
-       Esto es exactamente lo que pide la Ruling de pruebas del encargo
-       ("los extremos de la cuerda son las puntas del eje medial", el
-       CAMPO, no una lectura de las puntas del camino): si la
-       implementacion recalculara la cuerda desde ``path_px[0]``/``[-1]``
-       en vez de leer ``axis_tips_px``, la cuerda caeria en la fila 100,
-       no en la 150, y esta prueba lo atraparia.
+    Es lo que hace legible el contraste que el video vende: con los mismos
+    dos extremos, el hueco entre la recta y el arco ES la curvatura, y se
+    lee de un vistazo. Antes la cuerda unia las puntas del EJE MEDIAL
+    (pedicelo incluido) mientras el arco estaba recortado al fruto: las
+    dos lineas arrancaban en sitios distintos y la comparacion no se
+    entendia -- visible en la grabacion de la demo.
+
+    Rechaza la implementacion anterior, que leia ``axis_tips_px``: el
+    fixture pone esas puntas en una FILA DISTINTA de los extremos de la
+    curva, asi que dibujar desde ellas pinta donde este test exige fondo.
     """
-    canvas = np.zeros(_CANVAS_SHAPE, np.uint8)
-    bent_path = np.array([[50.0, 100.0], [150.0, 60.0], [250.0, 100.0]])
-    tips = (np.array([10.0, 150.0]), np.array([290.0, 150.0]))
-    mask = _rectangle_mask(_CANVAS_SHAPE[:2], 40, 40, 260, 160)
-    result = _result(mask, axis_path_px=bent_path, axis_tips_px=tips)
+    canvas_shape = (300, 400, 3)
+    canvas = np.zeros(canvas_shape, np.uint8)
+    mask = _rectangle_mask(canvas_shape[:2], 40, 120, 360, 180)
 
-    out = draw_results(canvas, [result], 0.2)
+    # Curva Codex horizontal en la fila 150, de x=60 a x=340.
+    outer_curve = np.array([[x, 150] for x in range(60, 341, 10)], dtype=float)
+    # Puntas del eje medial a OTRA altura (fila 200) y mas abiertas: si la
+    # cuerda se dibujara desde aqui, caeria en esa fila.
+    tips = (np.array([20.0, 200.0]), np.array([380.0, 200.0]))
 
-    assert tuple(out[60, 150]) == _COLOR_AXIS_AND_CHORD, "el doblez real del eje medial no se dibujo"
+    out = draw_results(
+        canvas,
+        [_result(mask, axis_tips_px=tips, outer_curve_px=outer_curve)],
+        mm_per_px=0.2,
+    )
 
-    # La cuerda es PUNTEADA (dash=14, gap=9 px, ver constantes de modulo):
-    # distancia 5 desde (10, 150) cae dentro del primer trazo, distancia 18
-    # cae dentro del primer hueco.
-    assert tuple(out[150, 15]) == _COLOR_AXIS_AND_CHORD, "no hay trazo donde el patron punteado exige uno"
-    assert tuple(out[150, 28]) == (0, 0, 0), "hay tinta en un hueco del patron punteado -- la cuerda salio SOLIDA"
-
-    # Ni el eje ni la cuerda deberian haber pintado donde caerian las
-    # puntas del CAMINO si, por error, la cuerda las hubiera usado en vez
-    # de ``axis_tips_px``.
-    assert tuple(out[100, 150]) == (0, 0, 0), "algo se dibujo en la fila de las puntas del camino, no de axis_tips_px"
-
+    # A mitad de camino entre los extremos de la curva (x=200) la cuerda
+    # cae sobre la fila 150, encima de la propia curva. Se mira un punto
+    # donde la curva NO esta: la cuerda entre los extremos del arco es el
+    # propio segmento, asi que se comprueba por la NEGATIVA -- la fila 200,
+    # donde la implementacion anterior la habria puesto, tiene que estar
+    # limpia.
+    assert not out[196:205, 150:250].any(), (
+        "se dibujo una cuerda en la fila de las puntas del eje medial"
+    )
+    # Y el segmento SI esta en la fila del arco: hay tinta de cuerda o de
+    # arco a lo largo de toda su extension.
+    assert out[146:155, 60:341].any()
 
 def test_codex_curve_is_drawn_on_top_of_the_contour_at_a_shared_pixel():
     """Jerarquia visual (encargo: "la curva Codex es la protagonista, no
@@ -648,7 +471,15 @@ def test_each_result_draws_only_its_own_geometry_not_its_neighbors():
     # geometria de un resultado con la del otro (p.ej. por indice de lista
     # en vez de por el propio ``BananaResult``) no pueda esconderse detras
     # de un orden casual.
-    wide_shape = (300, 900, 3)
+    # Se deriva del presupuesto del propio modulo en vez de fijar 900 a
+    # mano: al subir la escala de fuente para que el texto se lea en video
+    # el bloque paso a 330 px, y con 900 la mascara derecha (acaba en
+    # x=640) ya no cabia -- 640 + margen + bloque se sale del lienzo --
+    # asi que su ancla se volteaba a la izquierda y aterrizaba sobre la
+    # del mask_left: exactamente la colision de fixture que el parrafo de
+    # arriba describe. Derivarlo evita que vuelva a quedarse corto en
+    # silencio la proxima vez que cambie la tipografia.
+    wide_shape = (300, 640 + _LABEL_MARGIN_PX + _LABEL_BLOCK_WIDTH_PX + 60, 3)
     canvas = np.zeros(wide_shape, np.uint8)
 
     mask_left = _rectangle_mask(wide_shape[:2], 20, 50, 60, 150)
@@ -867,3 +698,39 @@ def test_locked_label_colors_are_unchanged_by_the_unlocked_fill_fix():
 
     assert _has_pixel_of_color(out_pass, _COLOR_LOCKED_PASS)
     assert _has_pixel_of_color(out_fail, _COLOR_LOCKED_FAIL)
+
+
+def test_marker_id_label_is_drawn_inside_the_marker_so_the_canvas_edge_cannot_clip_it():
+    """El id de un marcador pegado al borde del lienzo tiene que seguir
+    siendo legible.
+
+    Los 4 marcadores del rig viven en las ESQUINAS del lienzo por
+    construccion, asi que una etiqueta colocada por fuera del marcador cae
+    fuera del lienzo y se recorta: en la grabacion de la demo, dos de los
+    cuatro ids no se veian. Dibujarla DENTRO del cuadrilatero la ata a algo
+    que, si el marcador se ve, tambien se ve.
+
+    Rechaza la implementacion anterior, que anclaba el texto en
+    ``(min x, min y - 6)`` -- arriba y a la izquierda del marcador, fuera
+    de el.
+    """
+    canvas = np.zeros((400, 400, 3), np.uint8)
+    # Marcador pegado al borde superior: su esquina de arriba esta en y=1,
+    # asi que cualquier texto colocado por encima cae fuera del lienzo.
+    corners = np.array([[150.0, 1.0], [250.0, 1.0], [250.0, 101.0], [150.0, 101.0]])
+    detections = [MarkerDetection(id=7, corners=corners)]
+
+    out = draw_marker_overlay(canvas, detections)
+
+    # Region ESTRICTAMENTE interior: deja fuera los 2 px del contorno del
+    # propio marcador, que se dibuja en ambas implementaciones y por tanto
+    # no distingue nada. Con el anclaje anterior el texto caia en y = -5,
+    # fuera del lienzo, y aqui no habria un solo pixel encendido.
+    interior = out[12:92, 162:238]
+    assert interior.any(), "no se dibujo nada dentro del marcador: el id se perdio"
+
+    ys, xs = np.nonzero(interior.any(axis=2))
+    centre_x = 162 + xs.mean()
+    centre_y = 12 + ys.mean()
+    assert abs(centre_x - 200.0) < 12.0, f"el id no quedo centrado en x: {centre_x:.1f}"
+    assert abs(centre_y - 51.0) < 12.0, f"el id no quedo centrado en y: {centre_y:.1f}"

@@ -51,6 +51,7 @@ def measures(
     caliper: float = 36.0,
     area: float = 900.0,
     volume: float = 45_000.0,
+    chord: float = 152.0,
 ) -> BananaMeasures:
     """Construye un ``BananaMeasures`` minimo; ``width_profile`` no participa
     aqui, ni la geometria de pixel del overlay en vivo (encargo posterior
@@ -58,6 +59,7 @@ def measures(
     return BananaMeasures(
         codex_length_mm=length,
         caliper_mm=caliper,
+        chord_mm=chord,
         area_mm2=area,
         volume_mm3=volume,
         width_profile=(np.array([]), np.array([])),

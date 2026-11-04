@@ -200,9 +200,13 @@ def correct_measures(
 
     (derivacion de dos lineas y por que no se itera: docstring del modulo).
 
-    El factor se aplica UNA vez a las cuatro magnitudes crudas: longitud y
-    calibre a la primera potencia, area al cuadrado, volumen al cubo (ver
-    docstring del modulo).
+    El factor se aplica UNA vez a las magnitudes crudas: longitud, calibre
+    y cuerda a la primera potencia, area al cuadrado, volumen al cubo (ver
+    docstring del modulo). La cuerda es una longitud fisica en el plano del
+    fruto igual que el arco, asi que el paralaje la infla lo mismo:
+    corregir una y no la otra sesgaria el cociente cuerda/arco justo en la
+    magnitud de esta correccion (~6.5% sobre un banano real), y ese
+    cociente es lo que la interfaz publica.
 
     ``width_profile`` se reescala en LOS DOS EJES (``s_mm`` y ``w_mm``, las
     dos a la primera potencia), para que el perfil quede en las mismas
@@ -248,6 +252,7 @@ def correct_measures(
         measures,
         codex_length_mm=measures.codex_length_mm * factor,
         caliper_mm=measures.caliper_mm * factor,
+        chord_mm=measures.chord_mm * factor,
         area_mm2=measures.area_mm2 * factor ** 2,
         volume_mm3=measures.volume_mm3 * factor ** 3,
         width_profile=(raw_s_mm * factor, raw_w_mm * factor),

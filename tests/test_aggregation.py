@@ -64,6 +64,7 @@ def measures(
     caliper: float = 38.0,
     area: float = 1000.0,
     volume: float = 50_000.0,
+    chord: float = 180.0,
 ) -> BananaMeasures:
     """Construye un ``BananaMeasures`` minimo para las pruebas de este modulo.
 
@@ -75,6 +76,7 @@ def measures(
     return BananaMeasures(
         codex_length_mm=length,
         caliper_mm=caliper,
+        chord_mm=chord,
         area_mm2=area,
         volume_mm3=volume,
         width_profile=(np.array([]), np.array([])),
@@ -200,3 +202,22 @@ def test_push_returns_a_track_aggregate_with_the_pushed_track_id():
     out = agg.push(7, measures(length=190.0))
     assert isinstance(out, TrackAggregate)
     assert out.track_id == 7
+
+
+def test_reports_the_median_chord_over_the_window():
+    """La cuerda se agrega como las demas magnitudes: mediana de la ventana.
+
+    Rechaza una implementacion que la deje pasar sin agregar (tomando la
+    del ultimo cuadro), que en video se ve como un numero temblando al lado
+    de dos que ya se asentaron -- y que ademas haria que el ratio
+    cuerda/arco que la interfaz publica saltara cuadro a cuadro aunque el
+    fruto este quieto. La mediana rechaza el valor extremo que la media
+    arrastraria.
+    """
+    aggregator = MeasurementAggregator(window=5)
+    chords = [200.0, 201.0, 199.0, 200.5, 900.0]
+
+    for chord in chords:
+        aggregate = aggregator.push(7, measures(chord=chord))
+
+    assert aggregate.chord_mm == pytest.approx(200.5)

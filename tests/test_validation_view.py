@@ -46,6 +46,7 @@ def _aggregate(
     samples: int = 30,
     length_std_mm: float = 0.8,
     caliper_std_mm: float = 0.5,
+    chord_mm: float = 152.0,
 ) -> TrackAggregate:
     return TrackAggregate(
         track_id=track_id,
@@ -55,6 +56,7 @@ def _aggregate(
         length_std_mm=length_std_mm,
         caliper_mm=caliper_mm,
         caliper_std_mm=caliper_std_mm,
+        chord_mm=chord_mm,
         volume_mm3=volume_mm3,
         window=TEMPORAL_WINDOW,
     )
@@ -171,6 +173,7 @@ def _fill_log_with_real_samples(log: ValidationLog, n: int = 12) -> None:
             BananaMeasures(
                 codex_length_mm=180.0 + i,
                 caliper_mm=36.0,
+                chord_mm=152.0,
                 area_mm2=float("nan"),
                 volume_mm3=volume_mm3,
                 width_profile=(np.array([]), np.array([])),
@@ -214,6 +217,7 @@ def test_summary_includes_hand_measured_length_mae_when_present(qtbot, tmp_path)
             BananaMeasures(
                 codex_length_mm=185.0,
                 caliper_mm=36.0,
+                chord_mm=152.0,
                 area_mm2=float("nan"),
                 volume_mm3=volume_mm3,
                 width_profile=(np.array([]), np.array([])),
@@ -280,7 +284,7 @@ def test_length_and_caliper_cells_carry_their_sigma(qtbot, tmp_path):
         actual_weight_g=140.0,
     )
 
-    from codex_caliper.ui.overlay import format_measurement
+    from codex_caliper.ui.readout import format_measurement
 
     length_cell = view._table.item(0, view._column_index("codex_length_mm")).text()
     caliper_cell = view._table.item(0, view._column_index("caliper_mm")).text()

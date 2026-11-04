@@ -52,7 +52,7 @@ from PySide6.QtWidgets import QHeaderView, QLabel, QTableWidget, QTableWidgetIte
 
 from codex_caliper.aggregation import TrackAggregate
 from codex_caliper.geometry.measures import BananaMeasures
-from codex_caliper.ui.overlay import format_measurement
+from codex_caliper.ui.readout import format_measurement
 from codex_caliper.ui.theme import (
     BG_VOID_HEX,
     INK_MUTED_HEX,
@@ -192,6 +192,7 @@ class ValidationView(QWidget):
         motivo que ``area_mm2``/``width_profile``.
         """
         return BananaMeasures(
+            chord_mm=aggregate.chord_mm,
             codex_length_mm=aggregate.length_mm,
             caliper_mm=aggregate.caliper_mm,
             area_mm2=float("nan"),
