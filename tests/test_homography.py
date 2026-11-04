@@ -72,6 +72,122 @@ def _fake_camera_detections(cfg: AppConfig) -> list[MarkerDetection]:
     ]
 
 
+def _mounted_camera_detections(cfg: AppConfig, turns: dict[int, int]) -> list[MarkerDetection]:
+    """Como ``_fake_camera_detections``, pero cada marcador esta PEGADO al
+    plano girado ``turns[id]`` cuartos de vuelta.
+
+    Un marcador girado ocupa las MISMAS cuatro posiciones fisicas (el
+    conjunto de esquinas de un cuadrado es invariante al giro); lo que
+    cambia es cual de ellas es la esquina que el patron del propio marcador
+    declara como "superior izquierda", que es la que ``cv2.aruco`` devuelve
+    primero. Con ``t`` cuartos de vuelta, esa esquina esta en la posicion
+    ``t`` del cuadrado, y las siguientes en orden horario desde ahi.
+    """
+    theta = math.radians(7.0)
+    image_scale = 1.0 / 0.21
+    rotation = np.array([[math.cos(theta), -math.sin(theta)], [math.sin(theta), math.cos(theta)]])
+    linear = image_scale * rotation
+    translation = np.array([400.0, 250.0])
+    perspective = np.array([0.0003, 0.0002])
+
+    def project(point_mm: np.ndarray) -> np.ndarray:
+        xy = linear @ point_mm + translation
+        return xy / (1.0 + perspective @ point_mm)
+
+    half = cfg.marker_length_mm / 2.0
+    square = np.array([[-half, -half], [half, -half], [half, half], [-half, half]])
+
+    detections: list[MarkerDetection] = []
+    for marker_id in cfg.marker_ids:
+        centre = np.array(cfg.marker_layout[marker_id], dtype=float)
+        turn = turns[marker_id] % 4
+        physical = np.array([square[(j + turn) % 4] + centre for j in range(4)])
+        detections.append(
+            MarkerDetection(id=marker_id, corners=np.array([project(point) for point in physical]))
+        )
+    return detections
+
+
+@pytest.mark.parametrize(
+    "turn, expected_first_corner",
+    [
+        (0, (-1.0, -1.0)),
+        (1, (+1.0, -1.0)),
+        (2, (+1.0, +1.0)),
+        (3, (-1.0, +1.0)),
+    ],
+)
+def test_world_points_for_places_the_first_corner_by_the_detected_mounting_rotation(
+    turn, expected_first_corner
+):
+    """La primera esquina que entrega ``cv2.aruco`` es la superior izquierda
+    del PATRON del marcador, no la de menor x,y del mundo: si el marcador
+    esta pegado girado, son esquinas distintas.
+
+    Rechaza la implementacion que asume que todo marcador esta montado sin
+    girar y empareja siempre la esquina 0 con ``(cx - half, cy - half)``.
+    Con un marcador pegado a 180 grados esa suposicion desvia cada
+    correspondencia la DIAGONAL entera del marcador, y la homografia se
+    ajusta con esquinas de puntos distintos emparejadas entre si.
+    """
+    centre = (300.0, 200.0)
+    cfg = _cfg(marker_layout={4: centre}, marker_ids=[4])
+    detection = _mounted_camera_detections(cfg, {4: turn})[0]
+
+    world = world_points_for([detection], cfg)
+
+    half = cfg.marker_length_mm / 2.0
+    expected = (
+        centre[0] + expected_first_corner[0] * half,
+        centre[1] + expected_first_corner[1] * half,
+    )
+    assert tuple(world[0]) == pytest.approx(expected)
+
+
+def test_calibration_residual_stays_near_zero_when_markers_are_mounted_rotated():
+    """Las rotaciones de montaje reales del rig (tres marcadores a 180
+    grados y uno a 90) no deben costar NADA de exactitud: las esquinas
+    fisicas son las mismas, solo cambia cual entrega OpenCV primero.
+
+    Rechaza la implementacion que asume montaje sin girar. Medido sobre el
+    rig real: asumirlo da 32.05 mm de residual contra 2.32 mm corrigiendolo
+    -- del orden de la diagonal del marcador (24*raiz(2) = 33.9 mm), que es
+    exactamente lo que se desvia una correspondencia girada 180 grados.
+    """
+    cfg = _cfg()
+    mounted = {1: 2, 2: 2, 3: 2, 4: 1}
+    detections = _mounted_camera_detections(cfg, mounted)
+
+    plane = compute_plane_calibration(detections, cfg)
+
+    assert plane is not None
+    assert plane.state == CalibrationState.OK
+    assert plane.mm_per_px == pytest.approx(0.2, rel=1e-6)
+    assert plane.residual_mm < 0.05
+
+
+def test_a_marker_mounted_rotated_rectifies_to_the_same_plane_as_one_mounted_straight():
+    """Girar un marcador sobre su propia chincheta no mueve el plano: la
+    homografia ajustada con marcadores girados tiene que llevar los mismos
+    puntos de imagen a los mismos puntos de lienzo que la ajustada con
+    marcadores rectos.
+
+    Rechaza una "correccion" que recupere un residual bajo pero contra una
+    geometria distinta -- p.ej. girando el cuadrado del mundo en el sentido
+    equivocado, que vuelve a cerrar el ajuste sobre si mismo (el residual
+    mide consistencia interna) y aun asi rectifica a un plano espejado.
+    """
+    cfg = _cfg()
+    straight = compute_plane_calibration(_fake_camera_detections(cfg), cfg)
+    rotated = compute_plane_calibration(_mounted_camera_detections(cfg, {1: 2, 2: 2, 3: 2, 4: 1}), cfg)
+
+    probe_px = np.array([[400.0, 250.0], [900.0, 300.0], [700.0, 800.0]], dtype=np.float64)
+    straight_canvas = cv2.perspectiveTransform(probe_px.reshape(-1, 1, 2), straight.H).reshape(-1, 2)
+    rotated_canvas = cv2.perspectiveTransform(probe_px.reshape(-1, 1, 2), rotated.H).reshape(-1, 2)
+
+    assert rotated_canvas == pytest.approx(straight_canvas, abs=0.5)
+
+
 def test_recovers_scale_from_a_known_synthetic_homography():
     """Con las 16 esquinas proyectadas por una homografia de camara conocida
     y sin ruido, el ajuste debe recuperar la escala del lienzo casi exacta y

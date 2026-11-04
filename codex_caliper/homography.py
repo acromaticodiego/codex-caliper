@@ -88,6 +88,29 @@ class PlaneCalibration:
     mm_per_px: float
 
 
+def mounting_quarter_turns(corners: np.ndarray) -> int:
+    """Cuartos de vuelta a los que esta PEGADO el marcador, deducidos de su
+    propia orientacion en la imagen.
+
+    ``cv2.aruco`` entrega las esquinas empezando por la superior izquierda
+    del PATRON del marcador, que es una propiedad del codigo impreso, no de
+    donde caiga en la imagen. Un marcador pegado girado 180 grados entrega
+    primero la esquina que fisicamente esta abajo a la derecha. El angulo
+    del borde 0->1 delata ese giro: vale ~0 grados montado recto, ~90 a un
+    cuarto de vuelta, ~180 a media vuelta.
+
+    Supone que la camara esta aproximadamente a nivel sobre el plano
+    (balanceo menor de 45 grados), que es como el rig esta montado: con mas
+    balanceo que eso, el giro de la camara y el del montaje dejan de poder
+    distinguirse mirando solo un marcador. Medido sobre el rig real, los
+    cuatro angulos caen a menos de 6 grados de su multiplo de 90, asi que
+    el redondeo no esta cerca de ser ambiguo.
+    """
+    edge = np.asarray(corners, dtype=np.float64)[1] - np.asarray(corners, dtype=np.float64)[0]
+    angle_deg = math.degrees(math.atan2(float(edge[1]), float(edge[0])))
+    return int(round(angle_deg / 90.0)) % 4
+
+
 def world_points_for(detections: list[MarkerDetection], cfg: AppConfig) -> np.ndarray:
     """Esquinas de cada marcador detectado, en milimetros del mundo.
 
@@ -96,9 +119,20 @@ def world_points_for(detections: list[MarkerDetection], cfg: AppConfig) -> np.nd
     esquinas en el MISMO orden que entrega ``cv2.aruco``: superior-izquierda,
     superior-derecha, inferior-derecha, inferior-izquierda del propio
     marcador (horario, partiendo de la esquina superior izquierda vista en
-    el marco del marcador). Los marcadores del rig se montan sin rotacion
-    respecto al layout declarado, asi que esa esquina "superior izquierda
-    del marcador" coincide con la esquina de menor x y menor y en milimetros.
+    el marco del marcador).
+
+    Cual esquina FISICA es esa "superior izquierda del marcador" depende de
+    como este pegado el marcador, y NO se asume: se deduce de la propia
+    deteccion con ``mounting_quarter_turns``. La version anterior daba por
+    hecho que todos los marcadores estaban montados sin girar, y por tanto
+    emparejaba siempre la esquina 0 con la de menor x,y en milimetros. En
+    el rig real eso es falso -- tres marcadores estan pegados a 180 grados
+    y uno a 90 -- y cada correspondencia salia desviada hasta la DIAGONAL
+    entera del marcador (24*raiz(2) = 33.9 mm). Como el centroide de un
+    cuadrado no cambia al girarlo, la homografia de 4 marcadores seguia
+    colocando los centros mas o menos donde debian y el defecto no se veia:
+    lo que delataba era el residual de 32 mm y, al perder un marcador, un
+    lienzo rectificado que saltaba fuera del plano de trabajo.
 
     Si este orden no coincidiera con el de ``detection.corners``, la
     homografia se ajustaria con correspondencias desparejadas -- la esquina
@@ -108,15 +142,15 @@ def world_points_for(detections: list[MarkerDetection], cfg: AppConfig) -> np.nd
     que verifica el orden real de OpenCV en vez de asumirlo).
     """
     half = cfg.marker_length_mm / 2.0
+    square = ((-half, -half), (half, -half), (half, half), (-half, half))
     rows: list[list[list[float]]] = []
     for detection in detections:
         cx, cy = cfg.marker_layout[detection.id]
+        turn = mounting_quarter_turns(detection.corners)
         rows.append(
             [
-                [cx - half, cy - half],
-                [cx + half, cy - half],
-                [cx + half, cy + half],
-                [cx - half, cy + half],
+                [cx + square[(index + turn) % 4][0], cy + square[(index + turn) % 4][1]]
+                for index in range(4)
             ]
         )
     if not rows:
